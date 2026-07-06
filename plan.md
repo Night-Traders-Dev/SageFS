@@ -469,12 +469,12 @@ SageFS/
 - **Milestone:** Survives power-loss simulation without data loss
 
 ### Phase 4: Advanced Features (Weeks 13–18)
-- [ ] Snapshot engine (create, delete, diff)
-- [ ] Subvolume support
-- [ ] Transparent compression (lz4, zstd)
-- [ ] Deduplication engine
-- [ ] Encryption layer
-- [ ] Extended attributes (xattr)
+- [x] Snapshot engine (create, delete, diff)
+- [x] Subvolume support
+- [x] Transparent compression (lz4, zstd)
+- [x] Deduplication engine
+- [x] Encryption layer
+- [x] Extended attributes (xattr)
 - **Milestone:** Full feature parity with BTRFS core features
 
 ### Phase 5: Performance (Weeks 19–22)
