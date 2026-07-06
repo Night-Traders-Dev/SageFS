@@ -479,7 +479,7 @@ SageFS/
 
 ### Phase 5: Performance (Weeks 19–22)
 - [x] Garbage collector (greedy + cost-benefit)
-- [ ] Async I/O engine (io_uring)
+- [x] Async I/O engine (io_uring)
 - [ ] Caching layer (NAT cache, extent cache, node cache)
 - [ ] Multi-stream allocation optimization
 - [ ] Lock-free data structures for hot paths
@@ -487,13 +487,13 @@ SageFS/
 - **Milestone:** Meets or exceeds performance targets on NVMe
 
 ### Phase 6: Tooling & Polish (Weeks 23–26)
-- [ ] mkfs.sagefs (full-featured formatter)
-- [ ] mount.sagefs (mount helper)
-- [ ] fsck.sagefs (comprehensive checker)
-- [ ] CLI tool suite (snapshot, scrub, defrag, balance, stats)
-- [ ] RAID engine (mirror, stripe, parity)
-- [ ] Documentation (on-disk format spec, API reference)
-- [ ] Benchmark suite & regression tests
+- [x] mkfs.sagefs (full-featured formatter)
+- [x] mount.sagefs (mount helper)
+- [x] fsck.sagefs (comprehensive checker)
+- [x] CLI tool suite (snapshot, scrub, defrag, balance, stats)
+- [x] RAID engine (mirror, stripe, parity)
+- [x] Documentation (on-disk format spec, API reference)
+- [x] Benchmark suite - [ ] Benchmark suite & regression tests regression tests
 - **Milestone:** Production-ready filesystem with full toolchain
 
 ---
