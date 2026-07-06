@@ -249,6 +249,11 @@ Each implemented component is documented in its own file under [`docs/`](docs/):
 | Checksum Engine | [docs/checksum.md](docs/checksum.md) | CRC32C / xxHash / SHA-256 per-block integrity |
 | Journal & Transactions | [docs/journal.md](docs/journal.md) | Write-ahead log & crash recovery |
 | fsck | [docs/fsck.md](docs/fsck.md) | Offline consistency checker (NAT ↔ SIT ↔ inode tree) |
+| Snapshot Engine | [docs/snapshot.md](docs/snapshot.md) | Copy-on-write snapshot and subvolume management |
+| Compression | [docs/compress.md](docs/compress.md) | Transparent data compression |
+| Deduplication | [docs/dedup.md](docs/dedup.md) | Inline and background deduplication |
+| Encryption | [docs/encrypt.md](docs/encrypt.md) | File and filename encryption |
+| RAID Engine | [docs/raid.md](docs/raid.md) | Multi-device integration and parity |
 
 Start with the [documentation index](docs/README.md) for the recommended reading order.
 

@@ -17,6 +17,11 @@ This directory contains per-component design and API documentation for SageFS. E
 | [checksum.md](checksum.md) | `src/checksum.sage` | 3 | ✅ Implemented |
 | [journal.md](journal.md) | `src/journal.sage`, `src/transaction.sage` | 3 | ✅ Implemented |
 | [fsck.md](fsck.md) | `src/fsck.sage` | 3 | ✅ Implemented |
+| [snapshot.md](snapshot.md) | `src/snapshot.sage` | 4 | 🚧 In Progress |
+| [compress.md](compress.md) | `src/compress.sage` | 4 | 🚧 In Progress |
+| [dedup.md](dedup.md) | `src/dedup.sage` | 4 | 🚧 In Progress |
+| [encrypt.md](encrypt.md) | `src/encrypt.sage` | 4 | 🚧 In Progress |
+| [raid.md](raid.md) | `src/raid.sage` | 4 | 🚧 In Progress |
 
 ## Reading Order
 
@@ -33,6 +38,11 @@ For newcomers, we recommend reading the documentation in dependency order:
 9. **[checksum.md](checksum.md)** — per-block integrity (CRC32C / xxHash / SHA-256)
 10. **[journal.md](journal.md)** — write-ahead logging & transactions for crash recovery
 11. **[fsck.md](fsck.md)** — offline consistency checker (NAT ↔ SIT ↔ inode tree)
+12. **[snapshot.md](snapshot.md)** — copy-on-write snapshot and subvolume management
+13. **[compress.md](compress.md)** — transparent data compression
+14. **[dedup.md](dedup.md)** — inline and background deduplication
+15. **[encrypt.md](encrypt.md)** — file and filename encryption
+16. **[raid.md](raid.md)** — multi-device integration and parity
 
 ## Conventions
 
