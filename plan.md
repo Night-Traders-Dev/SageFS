@@ -493,7 +493,7 @@ SageFS/
 - [x] CLI tool suite (snapshot, scrub, defrag, balance, stats)
 - [x] RAID engine (mirror, stripe, parity)
 - [x] Documentation (on-disk format spec, API reference)
-- [x] Benchmark suite - [ ] Benchmark suite & regression tests regression tests
+- [x] Benchmark suite & regression tests
 - **Milestone:** Production-ready filesystem with full toolchain
 
 ---
