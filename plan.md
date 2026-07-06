@@ -478,7 +478,7 @@ SageFS/
 - **Milestone:** Full feature parity with BTRFS core features
 
 ### Phase 5: Performance (Weeks 19–22)
-- [ ] Garbage collector (greedy + cost-benefit)
+- [x] Garbage collector (greedy + cost-benefit)
 - [ ] Async I/O engine (io_uring)
 - [ ] Caching layer (NAT cache, extent cache, node cache)
 - [ ] Multi-stream allocation optimization
