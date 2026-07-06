@@ -228,7 +228,7 @@ Unlike BTRFS's uniform compression policy, SageFS selects compression algorithms
 
 See [plan.md](plan.md) for the full development plan.
 
-**Current progress:** Phases 1 & 2 complete (superblock, segment/SIT, NAT, allocator, inode, CoW B+ tree, directory, extent map). Phase 3 in progress — the checksum engine is done; the journal/WAL is next.
+**Current progress:** Phases 1–3 complete. Phase 1 & 2: superblock, segment/SIT, NAT, allocator, inode, CoW B+ tree, directory, extent map. Phase 3 (Integrity & Recovery): checksum engine, write-ahead journal, transaction manager (with nested transactions), crash-recovery replay, and offline fsck. Phase 4 (Advanced Features — snapshots, compression, dedup, encryption, RAID) is next.
 
 ---
 
@@ -247,7 +247,8 @@ Each implemented component is documented in its own file under [`docs/`](docs/):
 | Directory Manager | [docs/dir.md](docs/dir.md) | POSIX namespace, hashed dentries |
 | Extent Map | [docs/extent.md](docs/extent.md) | Extent-based allocation, hole punching |
 | Checksum Engine | [docs/checksum.md](docs/checksum.md) | CRC32C / xxHash / SHA-256 per-block integrity |
-| Journal & Transactions | [docs/journal.md](docs/journal.md) | Write-ahead log & crash recovery (in progress) |
+| Journal & Transactions | [docs/journal.md](docs/journal.md) | Write-ahead log & crash recovery |
+| fsck | [docs/fsck.md](docs/fsck.md) | Offline consistency checker (NAT ↔ SIT ↔ inode tree) |
 
 Start with the [documentation index](docs/README.md) for the recommended reading order.
 

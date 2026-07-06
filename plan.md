@@ -461,11 +461,11 @@ SageFS/
 
 ### Phase 3: Integrity & Recovery (Weeks 9–12)
 - [x] Checksum engine (CRC32C + xxHash)
-- [ ] Journal (WAL) implementation
-- [ ] Transaction manager
-- [ ] Crash recovery (journal replay)
-- [ ] Basic fsck
-- [ ] Orphan inode recovery
+- [x] Journal (WAL) implementation
+- [x] Transaction manager
+- [x] Crash recovery (journal replay)
+- [x] Basic fsck
+- [x] Orphan inode recovery
 - **Milestone:** Survives power-loss simulation without data loss
 
 ### Phase 4: Advanced Features (Weeks 13–18)

@@ -15,7 +15,8 @@ This directory contains per-component design and API documentation for SageFS. E
 | [dir.md](dir.md) | `src/dir.sage` | 2 | ✅ Implemented |
 | [extent.md](extent.md) | `src/extent.sage` | 2 | ✅ Implemented |
 | [checksum.md](checksum.md) | `src/checksum.sage` | 3 | ✅ Implemented |
-| [journal.md](journal.md) | `src/journal.sage` | 3 | 🚧 In progress |
+| [journal.md](journal.md) | `src/journal.sage`, `src/transaction.sage` | 3 | ✅ Implemented |
+| [fsck.md](fsck.md) | `src/fsck.sage` | 3 | ✅ Implemented |
 
 ## Reading Order
 
@@ -30,7 +31,8 @@ For newcomers, we recommend reading the documentation in dependency order:
 7. **[dir.md](dir.md)** — namespace operations built on inodes + B+ trees
 8. **[extent.md](extent.md)** — extent-based file allocation and hole punching
 9. **[checksum.md](checksum.md)** — per-block integrity (CRC32C / xxHash / SHA-256)
-10. **[journal.md](journal.md)** — write-ahead logging for crash recovery
+10. **[journal.md](journal.md)** — write-ahead logging & transactions for crash recovery
+11. **[fsck.md](fsck.md)** — offline consistency checker (NAT ↔ SIT ↔ inode tree)
 
 ## Conventions
 
