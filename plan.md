@@ -460,7 +460,7 @@ SageFS/
 - **Milestone:** Can create directories, write files, and read them back
 
 ### Phase 3: Integrity & Recovery (Weeks 9–12)
-- [ ] Checksum engine (CRC32C + xxHash)
+- [x] Checksum engine (CRC32C + xxHash)
 - [ ] Journal (WAL) implementation
 - [ ] Transaction manager
 - [ ] Crash recovery (journal replay)
