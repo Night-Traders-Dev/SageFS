@@ -228,6 +228,29 @@ Unlike BTRFS's uniform compression policy, SageFS selects compression algorithms
 
 See [plan.md](plan.md) for the full development plan.
 
+**Current progress:** Phases 1 & 2 complete (superblock, segment/SIT, NAT, allocator, inode, CoW B+ tree, directory, extent map). Phase 3 in progress — the checksum engine is done; the journal/WAL is next.
+
+---
+
+## Documentation
+
+Each implemented component is documented in its own file under [`docs/`](docs/):
+
+| Component | Doc | Description |
+|-----------|-----|-------------|
+| Superblock & Checkpoint | [docs/superblock.md](docs/superblock.md) | On-disk root, feature flags, atomic checkpoints |
+| Segment Manager (SIT) | [docs/segment.md](docs/segment.md) | Log-structured segments, multi-head logging, GC victim selection |
+| Node Address Table | [docs/nat.md](docs/nat.md) | nid → block indirection, wandering-tree elimination |
+| Block Allocator | [docs/allocator.md](docs/allocator.md) | Unified allocation over SIT + NAT |
+| Inode Manager | [docs/inode.md](docs/inode.md) | File/dir metadata, inline data, block pointers |
+| CoW B+ Tree | [docs/btree.md](docs/btree.md) | Copy-on-write index for dirs, extents, snapshots |
+| Directory Manager | [docs/dir.md](docs/dir.md) | POSIX namespace, hashed dentries |
+| Extent Map | [docs/extent.md](docs/extent.md) | Extent-based allocation, hole punching |
+| Checksum Engine | [docs/checksum.md](docs/checksum.md) | CRC32C / xxHash / SHA-256 per-block integrity |
+| Journal & Transactions | [docs/journal.md](docs/journal.md) | Write-ahead log & crash recovery (in progress) |
+
+Start with the [documentation index](docs/README.md) for the recommended reading order.
+
 ---
 
 ## Why SageLang?
