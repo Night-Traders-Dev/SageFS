@@ -1,0 +1,13 @@
+{
+  "name": "sagefs-dev",
+  "version": "1.0.0",
+  "description": "SageFS development workspace",
+  "main": "index.js",
+  "scripts": {
+    "dev": "echo 'No dev server for SageFS'",
+    "build": "echo 'No build for SageFS'",
+    "start": "echo 'No start for SageFS'"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
