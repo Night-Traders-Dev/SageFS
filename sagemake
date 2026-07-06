@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+import sys
+import os
+import shutil
+import subprocess
+from pathlib import Path
+import hashlib
+import platform
+import tempfile
+
+# ── Terminal colors ───────────────────────────────────────────────────────────
+BOLD = "\033[1m"
+GREEN = "\033[32m"
+RED = "\033[31m"
+YELLOW = "\033[33m"
+CYAN = "\033[36m"
+RESET = "\033[0m"
+
+def banner(text: str) -> None:
+    print(f"\n{BOLD}{CYAN}==> {text}{RESET}")
+
+def section(text: str) -> None:
+    print(f"\n{BOLD}{text}{RESET}")
+
+def step(text: str) -> None:
+    print(f"  {text}...", end=" ", flush=True)
+
+def ok() -> None:
+    print(f"{GREEN}OK{RESET}")
+
+def fail() -> None:
+    print(f"{RED}FAILED{RESET}")
+
+def step_ok(text: str) -> None:
+    print(f"  {GREEN}✓{RESET} {text}")
+
+def step_fail(text: str) -> None:
+    print(f"  {RED}✗{RESET} {text}")
+    sys.exit(1)
+
+def step_warn(text: str) -> None:
+    print(f"  {YELLOW}!{RESET} {text}")
+
+def run(cmd: list[str], cwd: Path = None) -> None:
+    try:
+        subprocess.run(cmd, cwd=cwd, check=True)
+    except subprocess.CalledProcessError as e:
+        step_fail(f"command failed: {' '.join(cmd)}")
+    except FileNotFoundError:
+        step_fail(f"command not found: {cmd[0]}")
+
+# ── Project config ────────────────────────────────────────────────────────────
+ROOT = Path(__file__).resolve().parent
+BUILD_DIR = ROOT / "build"
+SRC_DIR = ROOT / "src"
+TEST_DIR = ROOT / "testing"
+BINARY_NAME = "mkfs.sagefs"
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def get_source_hash(directory: Path, args: list[str] = None) -> str:
+    if not directory.exists():
+        return ""
+    hasher = hashlib.sha256()
+    sys_info = f"{platform.system()}-{platform.machine()}".encode("utf-8")
+    hasher.update(len(sys_info).to_bytes(8, byteorder='big'))
+    hasher.update(sys_info)
+    hasher.update(b"\0")
+    if args:
+        for arg in args:
+            arg_bytes = arg.encode("utf-8")
+            hasher.update(len(arg_bytes).to_bytes(8, byteorder='big'))
+            hasher.update(arg_bytes)
+            hasher.update(b"\0")
+    env_vars = ["CC", "CFLAGS", "CXX", "CXXFLAGS", "LDFLAGS", "SAGE_PATH"]
+    for var in env_vars:
+        val = os.environ.get(var, "")
+        if val:
+            val_bytes = f"{var}={val}".encode("utf-8")
+            hasher.update(len(val_bytes).to_bytes(8, byteorder='big'))
+            hasher.update(val_bytes)
+            hasher.update(b"\0")
+    script_path = Path(__file__).resolve()
+    rglob_files = [p for p in sorted(directory.rglob("*"), key=lambda p: p.as_posix()) if p.resolve() != script_path]
+    if script_path.exists():
+        files_to_hash = [script_path] + rglob_files
+    else:
+        files_to_hash = rglob_files
+    for filepath in files_to_hash:
+        if filepath.is_file():
+            if filepath == script_path:
+                path_bytes = b"\x00__sagemake_script__"
+            else:
+                path_bytes = filepath.relative_to(directory).as_posix().encode("utf-8")
+            hasher.update(len(path_bytes).to_bytes(8, byteorder='big'))
+            hasher.update(path_bytes)
+            hasher.update(b"\0")
+            try:
+                st = filepath.stat()
+                exec_bit = 1 if bool(st.st_mode & 0o111) else 0
+                hasher.update(exec_bit.to_bytes(8, byteorder='big'))
+                hasher.update(st.st_size.to_bytes(8, byteorder='big'))
+                with open(filepath, "rb") as f:
+                    while chunk := f.read(8192):
+                        hasher.update(chunk)
+            except Exception as e:
+                step_fail(f"failed to read {filepath} for hashing: {e}")
+    return hasher.hexdigest()
+
+# ── Commands ──────────────────────────────────────────────────────────────────
+def cmd_build(args: list[str]) -> None:
+    banner("build — SageFS")
+    check_dependencies()
+    section("Compilation")
+    
+    current_hash = get_source_hash(SRC_DIR, args)
+    hash_file = BUILD_DIR / ".build_hash"
+    binary_file = BUILD_DIR / BINARY_NAME
+    binary_hash = ""
+    if binary_file.exists():
+        b_hasher = hashlib.sha256()
+        try:
+            with open(binary_file, "rb") as f:
+                while chunk := f.read(8192):
+                    b_hasher.update(chunk)
+            binary_hash = b_hasher.hexdigest()
+        except Exception:
+            binary_hash = ""
+    combined_hash = f"{current_hash}:{binary_hash}"
+    if hash_file.exists() and current_hash != "" and binary_hash != "":
+        cached_hash = hash_file.read_text(encoding="utf-8").strip()
+        if cached_hash == combined_hash:
+            step_ok("up-to-date")
+            return
+            
+    step("compiling source")
+    BUILD_DIR.mkdir(parents=True, exist_ok=True)
+    
+    run(["sage", "--compile", str(SRC_DIR / "mkfs.sage"), "-o", str(BUILD_DIR / BINARY_NAME), "-O3"])
+    run(["sage", "--emit-c", str(SRC_DIR / "vfs.sage"), "-o", str(BUILD_DIR / "sagefs_vfs.c")])
+    ok()
+    
+    new_binary_hash = ""
+    if binary_file.exists():
+        b_hasher = hashlib.sha256()
+        try:
+            with open(binary_file, "rb") as f:
+                while chunk := f.read(8192):
+                    b_hasher.update(chunk)
+            new_binary_hash = b_hasher.hexdigest()
+        except Exception:
+            new_binary_hash = ""
+    new_combined_hash = f"{current_hash}:{new_binary_hash}"
+    fd, tmp_path = tempfile.mkstemp(dir=BUILD_DIR, prefix=".build_hash_", suffix=".tmp")
+    with open(fd, "w", encoding="utf-8") as f:
+        f.write(new_combined_hash)
+    Path(tmp_path).replace(hash_file)
+
+def cmd_test(args: list[str]) -> None:
+    banner("test — SageFS")
+    section("Running tests")
+    check_dependencies()
+    
+    test_files = sorted(TEST_DIR.glob("test_*.sage"))
+    if not test_files:
+        step_warn("No test files found in testing/")
+        return
+        
+    for test_file in test_files:
+        step(f"Running {test_file.name}")
+        try:
+            subprocess.run(["sage", "--runtime", "bytecode", str(test_file)], check=True, capture_output=True)
+            ok()
+        except subprocess.CalledProcessError as e:
+            fail()
+            print(e.stderr.decode() if e.stderr else e.stdout.decode())
+            sys.exit(1)
+        except FileNotFoundError:
+            step_fail("sage command not found")
+            
+    step_ok("all tests passed")
+
+def cmd_install(args: list[str]) -> None:
+    banner("install — SageFS")
+    install_dir = Path("/usr/local/bin") if os.name != "nt" else Path(os.environ.get("APPDATA", "C:/ProgramData")) / "SageFS"
+    target = install_dir / BINARY_NAME
+    step(f"installing to {target}")
+    if not (BUILD_DIR / BINARY_NAME).exists():
+        step_fail(f"{BINARY_NAME} not built — run build first")
+    try:
+        install_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(BUILD_DIR / BINARY_NAME, target)
+        if os.name != "nt":
+            target.chmod(0o755)
+    except PermissionError:
+        step_fail("permission denied (try running as Administrator/root)")
+    except Exception as e:
+        step_fail(f"installation failed: {e}")
+    step_ok(f"installed {BINARY_NAME}")
+
+def cmd_clean(args: list[str]) -> None:
+    banner("clean — SageFS")
+    section("Removing build artifacts")
+    step(f"removing {BUILD_DIR}")
+    if BUILD_DIR.exists():
+        try:
+            shutil.rmtree(BUILD_DIR)
+        except Exception as e:
+            step_fail(f"failed to remove build dir: {e}")
+    ok()
+
+def cmd_all(args: list[str]) -> None:
+    cmd_build(args)
+    cmd_test(args)
+
+# ── Dependency check ──────────────────────────────────────────────────────────
+def check_dependencies() -> None:
+    section("Dependencies")
+    required = ["sage"]
+    missing = []
+    for dep in required:
+        step(f"checking {dep}")
+        if shutil.which(dep) is None:
+            missing.append(dep)
+            print(f"{RED}✗ not found{RESET}")
+        else:
+            ok()
+    if missing:
+        step_fail(f"missing: {', '.join(missing)}")
+
+# ── CLI dispatch ──────────────────────────────────────────────────────────────
+def main() -> None:
+    commands = {
+        "build": cmd_build,
+        "test": cmd_test,
+        "install": cmd_install,
+        "clean": cmd_clean,
+        "all": cmd_all,
+    }
+    if len(sys.argv) < 2 or sys.argv[1] not in commands:
+        banner("SageFS — sagemake")
+        print(f"  Usage:  ./sagemake {'|'.join(commands.keys())}")
+        print()
+        sys.exit(1)
+    cmd = sys.argv[1]
+    args = sys.argv[2:]
+    commands[cmd](args)
+
+if __name__ == "__main__":
+    main()
