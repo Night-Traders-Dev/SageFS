@@ -174,12 +174,12 @@ proc write_bytes_padded(buf: Bytes, data: String, padded_len: Int):
 proc read_bytes_string(buf: Bytes, offset: Int, max_len: Int) -> String:
     ## Read a zero-padded string field from `buf`.  Stops at the first NUL
     ## byte or after `max_len` bytes, whichever comes first.
-    var end: Int = offset
-    while end < offset + max_len:
-        if bytes_get(buf, end) == 0:
+    var endstring: Int = offset
+    while endstring < offset + max_len:
+        if bytes_get(buf, endstring) == 0:
             break
-        end = end + 1
-    return bytes_to_string(bytes_slice(buf, offset, end))
+        endstring = endstring + 1
+    return bytes_to_string(bytes_slice(buf, offset, endstring))
 
 proc generate_uuid() -> String:
     ## Generate a simple UUID-like identifier.
@@ -197,7 +197,7 @@ proc generate_uuid() -> String:
     ## Convert each seed to 8 hex chars and concatenate to get 32 hex digits
     let hex_chars: String = "0123456789abcdef"
     var result: String = ""
-    var seeds: [Int] = [seed1, seed2, seed3, seed4]
+    var seeds = [seed1, seed2, seed3, seed4]
     var idx: Int = 0
     while idx < len(seeds):
         var val: Int = seeds[idx]
