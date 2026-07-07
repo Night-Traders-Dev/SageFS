@@ -137,6 +137,8 @@ def cmd_build(args: list[str]) -> None:
     
     run(["sage", "--compile", str(SRC_DIR / "mkfs.sage"), "-o", str(BUILD_DIR / BINARY_NAME), "-O3"])
     run(["sage", "--emit-c", str(SRC_DIR / "vfs.sage"), "-o", str(BUILD_DIR / "sagefs_vfs.c")])
+    run(["sagevm", "compile", str(SRC_DIR / "mkfs.sage"), str(BUILD_DIR / "mkfs.sgvm")])
+    run(["sagevm", "compile", str(SRC_DIR / "mkfs.sage"), str(BUILD_DIR / "mkfs.sgrv"), "--riscv"])
     ok()
     
     new_binary_hash = ""
@@ -215,7 +217,7 @@ def cmd_all(args: list[str]) -> None:
 # ── Dependency check ──────────────────────────────────────────────────────────
 def check_dependencies() -> None:
     section("Dependencies")
-    required = ["sage"]
+    required = ["sage", "sagevm"]
     missing = []
     for dep in required:
         step(f"checking {dep}")
