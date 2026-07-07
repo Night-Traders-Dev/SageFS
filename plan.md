@@ -443,20 +443,20 @@ SageFS/
 ## 7. Development Phases & Milestones
 
 ### Phase 1: Foundation (Weeks 1–4) — MVP on disk image
-- [ ] Superblock read/write/validate
-- [ ] Checkpoint pack management
-- [ ] Segment manager + SIT
-- [ ] NAT implementation
-- [ ] Block allocator (single-stream first)
-- [ ] Basic inode create/read/write/delete
+- [x] Superblock read/write/validate
+- [x] Checkpoint pack management
+- [x] Segment manager + SIT
+- [x] NAT implementation
+- [x] Block allocator (single-stream first)
+- [x] Basic inode create/read/write/delete
 - **Milestone:** Can format an image and write/read inodes
 
 ### Phase 2: Tree & Namespace (Weeks 5–8)
-- [ ] CoW B+ tree (insert, delete, search, split, merge)
-- [ ] Directory operations (create, lookup, list, remove, rename)
-- [ ] Extent map implementation
-- [ ] Inline data & inline directory
-- [ ] Multi-head logging (6 zones)
+- [x] CoW B+ tree (insert, delete, search, split, merge)
+- [x] Directory operations (create, lookup, list, remove, rename)
+- [x] Extent map implementation
+- [x] Inline data & inline directory
+- [x] Multi-head logging (6 zones)
 - **Milestone:** Can create directories, write files, and read them back
 
 ### Phase 3: Integrity & Recovery (Weeks 9–12)
@@ -480,10 +480,10 @@ SageFS/
 ### Phase 5: Performance (Weeks 19–22)
 - [x] Garbage collector (greedy + cost-benefit)
 - [x] Async I/O engine (io_uring)
-- [ ] Caching layer (NAT cache, extent cache, node cache)
-- [ ] Multi-stream allocation optimization
-- [ ] Lock-free data structures for hot paths
-- [ ] Read-ahead & write coalescing
+- [x] Caching layer (NAT cache, extent cache, node cache)
+- [x] Multi-stream allocation optimization
+- [x] Lock-free data structures for hot paths
+- [x] Read-ahead & write coalescing
 - **Milestone:** Meets or exceeds performance targets on NVMe
 
 ### Phase 6: Tooling & Polish (Weeks 23–26)
