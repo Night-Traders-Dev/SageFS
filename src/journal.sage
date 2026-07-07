@@ -110,7 +110,7 @@ class JournalRecord:
         var i: Int = 0
         let n: Int = bytes_len(self.payload)
         while i < n:
-            bytes_push(buf, bytes_get(self.payload, i))
+            push(buf, bytes_get(self.payload, i))
             i = i + 1
 
         ## Compute checksum over the whole buffer (checksum field currently 0)
@@ -204,7 +204,7 @@ class Journal:
         var i: Int = 0
         let n: Int = bytes_len(encoded)
         while i < n:
-            bytes_push(self.buffer, bytes_get(encoded, i))
+            push(self.buffer, bytes_get(encoded, i))
             i = i + 1
         return lsn
 
@@ -231,9 +231,9 @@ class Journal:
             var j: Int = 0
             while j < self.block_size:
                 if off + j < total:
-                    bytes_push(chunk, bytes_get(self.buffer, off + j))
+                    push(chunk, bytes_get(self.buffer, off + j))
                 else:
-                    bytes_push(chunk, 0)
+                    push(chunk, 0)
                 j = j + 1
             self.device.write_block(blk, chunk)
             off = off + self.block_size
@@ -325,7 +325,7 @@ class Journal:
             var i: Int = 0
             let n: Int = bytes_len(chunk)
             while i < n:
-                bytes_push(buf, bytes_get(chunk, i))
+                push(buf, bytes_get(chunk, i))
                 i = i + 1
             blk = blk + 1
             read = read + 1
@@ -351,20 +351,20 @@ class Journal:
 # ===========================================================================
 
 proc jwrite_le32(buf: Bytes, value: Int):
-    bytes_push(buf, value & 0xFF)
-    bytes_push(buf, (value >> 8) & 0xFF)
-    bytes_push(buf, (value >> 16) & 0xFF)
-    bytes_push(buf, (value >> 24) & 0xFF)
+    push(buf, value & 0xFF)
+    push(buf, (value >> 8) & 0xFF)
+    push(buf, (value >> 16) & 0xFF)
+    push(buf, (value >> 24) & 0xFF)
 
 proc jwrite_le64(buf: Bytes, value: Int):
-    bytes_push(buf, value & 0xFF)
-    bytes_push(buf, (value >> 8) & 0xFF)
-    bytes_push(buf, (value >> 16) & 0xFF)
-    bytes_push(buf, (value >> 24) & 0xFF)
-    bytes_push(buf, (value >> 32) & 0xFF)
-    bytes_push(buf, (value >> 40) & 0xFF)
-    bytes_push(buf, (value >> 48) & 0xFF)
-    bytes_push(buf, (value >> 56) & 0xFF)
+    push(buf, value & 0xFF)
+    push(buf, (value >> 8) & 0xFF)
+    push(buf, (value >> 16) & 0xFF)
+    push(buf, (value >> 24) & 0xFF)
+    push(buf, (value >> 32) & 0xFF)
+    push(buf, (value >> 40) & 0xFF)
+    push(buf, (value >> 48) & 0xFF)
+    push(buf, (value >> 56) & 0xFF)
 
 proc jread_le32(buf: Bytes, offset: Int) -> Int:
     let b0: Int = bytes_get(buf, offset)
@@ -396,6 +396,6 @@ proc jslice(buf: Bytes, start: Int, end: Int) -> Bytes:
     let out: Bytes = bytes()
     var i: Int = start
     while i < end:
-        bytes_push(out, bytes_get(buf, i))
+        push(out, bytes_get(buf, i))
         i = i + 1
     return out

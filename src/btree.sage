@@ -82,14 +82,14 @@ class BTreeKey:
         
         # Pack object_id (64-bit, big-endian)
         for i in range(8):
-            bytes_push(b, (self.object_id >> (56 - i * 8)) & 0xFF)
+            push(b, (self.object_id >> (56 - i * 8)) & 0xFF)
             
         # Pack type (8-bit)
-        bytes_push(b, self.type & 0xFF)
+        push(b, self.type & 0xFF)
         
         # Pack offset (56-bit, big-endian)
         for i in range(7):
-            bytes_push(b, (self.offset >> (48 - i * 8)) & 0xFF)
+            push(b, (self.offset >> (48 - i * 8)) & 0xFF)
             
         return b
 
@@ -161,13 +161,13 @@ class BTreeNode:
         
         # Serialize magic number
         for i in range(4):
-            bytes_push(b, (BTREE_MAGIC >> (24 - i * 8)) & 0xFF)
+            push(b, (BTREE_MAGIC >> (24 - i * 8)) & 0xFF)
             
         # Serialize node metadata flags
         if self.is_leaf:
-            bytes_push(b, 1)
+            push(b, 1)
         else:
-            bytes_push(b, 0)
+            push(b, 0)
             
         # Note: A full implementation would carefully pack self.num_items,
         # self.level, self.generation, all items/pointers, and the data_area.
@@ -208,7 +208,7 @@ class BTreeNode:
             item.data_offset = bytes_len(self.data_area)
             item.data_size = bytes_len(data)
             for i in range(bytes_len(data)):
-                bytes_push(self.data_area, bytes_get(data, i))
+                push(self.data_area, bytes_get(data, i))
             return
             
         # Calculate offset in data_area for new data
@@ -217,7 +217,7 @@ class BTreeNode:
         
         # Append data to the end of data_area
         for i in range(data_size):
-            bytes_push(self.data_area, bytes_get(data, i))
+            push(self.data_area, bytes_get(data, i))
             
         let new_item = BTreeItem(key, data_offset, data_size)
         
@@ -320,7 +320,7 @@ class BTreeEngine:
             
         # Copy data area
         for i in range(bytes_len(node.data_area)):
-            bytes_push(new_node.data_area, bytes_get(node.data_area, i))
+            push(new_node.data_area, bytes_get(node.data_area, i))
             
         return new_node
 
@@ -347,7 +347,7 @@ class BTreeEngine:
             let item = curr_node.items[idx]
             let val = bytes()
             for i in range(item.data_size):
-                bytes_push(val, bytes_get(curr_node.data_area, item.data_offset + i))
+                push(val, bytes_get(curr_node.data_area, item.data_offset + i))
             return val
             
         return bytes()

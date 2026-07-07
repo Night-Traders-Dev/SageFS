@@ -123,14 +123,14 @@ let STATE_ERROR: Int = 2
 proc write_le64(buf: Bytes, value: Int):
     ## Write a 64-bit integer to `buf` in little-endian order (8 bytes).
     ## Each byte is extracted via mask-and-shift.
-    bytes_push(buf, value & 0xFF)
-    bytes_push(buf, (value >> 8) & 0xFF)
-    bytes_push(buf, (value >> 16) & 0xFF)
-    bytes_push(buf, (value >> 24) & 0xFF)
-    bytes_push(buf, (value >> 32) & 0xFF)
-    bytes_push(buf, (value >> 40) & 0xFF)
-    bytes_push(buf, (value >> 48) & 0xFF)
-    bytes_push(buf, (value >> 56) & 0xFF)
+    push(buf, value & 0xFF)
+    push(buf, (value >> 8) & 0xFF)
+    push(buf, (value >> 16) & 0xFF)
+    push(buf, (value >> 24) & 0xFF)
+    push(buf, (value >> 32) & 0xFF)
+    push(buf, (value >> 40) & 0xFF)
+    push(buf, (value >> 48) & 0xFF)
+    push(buf, (value >> 56) & 0xFF)
 
 proc read_le64(buf: Bytes, offset: Int) -> Int:
     ## Read a 64-bit little-endian integer from `buf` starting at `offset`.
@@ -146,10 +146,10 @@ proc read_le64(buf: Bytes, offset: Int) -> Int:
 
 proc write_le32(buf: Bytes, value: Int):
     ## Write a 32-bit integer to `buf` in little-endian order (4 bytes).
-    bytes_push(buf, value & 0xFF)
-    bytes_push(buf, (value >> 8) & 0xFF)
-    bytes_push(buf, (value >> 16) & 0xFF)
-    bytes_push(buf, (value >> 24) & 0xFF)
+    push(buf, value & 0xFF)
+    push(buf, (value >> 8) & 0xFF)
+    push(buf, (value >> 16) & 0xFF)
+    push(buf, (value >> 24) & 0xFF)
 
 proc read_le32(buf: Bytes, offset: Int) -> Int:
     ## Read a 32-bit little-endian integer from `buf` starting at `offset`.
@@ -166,9 +166,9 @@ proc write_bytes_padded(buf: Bytes, data: String, padded_len: Int):
     var written: Int = 0
     while written < padded_len:
         if written < bytes_len(data_bytes):
-            bytes_push(buf, bytes_get(data_bytes, written))
+            push(buf, bytes_get(data_bytes, written))
         else:
-            bytes_push(buf, 0)
+            push(buf, 0)
         written = written + 1
 
 proc read_bytes_string(buf: Bytes, offset: Int, max_len: Int) -> String:

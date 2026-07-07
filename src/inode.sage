@@ -423,7 +423,7 @@ class SageFSInode:
         ## Build the output buffer and zero-pad to exactly INODE_SIZE bytes
         var buf: Bytes = bytes(header)
         while bytes_len(buf) < INODE_SIZE:
-            bytes_push(buf, 0)
+            push(buf, 0)
 
         return buf
 

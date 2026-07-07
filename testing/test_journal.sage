@@ -58,7 +58,7 @@ class MemDevice:
         let z: Bytes = bytes()
         var i: Int = 0
         while i < self.block_size:
-            bytes_push(z, 0)
+            push(z, 0)
             i = i + 1
         return z
 

@@ -392,21 +392,21 @@ proc sort_ints(arr: Array[Int]) -> Array[Int]:
 
 proc write_le32(buf: Bytes, value: Int):
     ## Append a 32-bit little-endian integer to `buf`.
-    bytes_push(buf, value & 0xFF)
-    bytes_push(buf, (value >> 8) & 0xFF)
-    bytes_push(buf, (value >> 16) & 0xFF)
-    bytes_push(buf, (value >> 24) & 0xFF)
+    push(buf, value & 0xFF)
+    push(buf, (value >> 8) & 0xFF)
+    push(buf, (value >> 16) & 0xFF)
+    push(buf, (value >> 24) & 0xFF)
 
 proc write_le64(buf: Bytes, value: Int):
     ## Append a 64-bit little-endian integer to `buf`.
-    bytes_push(buf, value & 0xFF)
-    bytes_push(buf, (value >> 8) & 0xFF)
-    bytes_push(buf, (value >> 16) & 0xFF)
-    bytes_push(buf, (value >> 24) & 0xFF)
-    bytes_push(buf, (value >> 32) & 0xFF)
-    bytes_push(buf, (value >> 40) & 0xFF)
-    bytes_push(buf, (value >> 48) & 0xFF)
-    bytes_push(buf, (value >> 56) & 0xFF)
+    push(buf, value & 0xFF)
+    push(buf, (value >> 8) & 0xFF)
+    push(buf, (value >> 16) & 0xFF)
+    push(buf, (value >> 24) & 0xFF)
+    push(buf, (value >> 32) & 0xFF)
+    push(buf, (value >> 40) & 0xFF)
+    push(buf, (value >> 48) & 0xFF)
+    push(buf, (value >> 56) & 0xFF)
 
 proc read_le32(buf: Bytes, offset: Int) -> Int:
     ## Read a 32-bit little-endian integer from `buf` at `offset`.
