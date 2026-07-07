@@ -137,8 +137,12 @@ def cmd_build(args: list[str]) -> None:
     
     run(["sage", "--compile", str(SRC_DIR / "mkfs.sage"), "-o", str(BUILD_DIR / BINARY_NAME), "-O3"])
     run(["sage", "--emit-c", str(SRC_DIR / "vfs.sage"), "-o", str(BUILD_DIR / "sagefs_vfs.c")])
-    run(["sagevm", "compile", str(SRC_DIR / "mkfs.sage"), str(BUILD_DIR / "mkfs.sgvm")])
-    run(["sagevm", "compile", str(SRC_DIR / "mkfs.sage"), str(BUILD_DIR / "mkfs.sgrv"), "--riscv"])
+    
+    if "--build-vm-stack" in args:
+        run(["sagevm", "compile", str(SRC_DIR / "mkfs.sage"), str(BUILD_DIR / "mkfs.sgvm")])
+    if "--build-vm-riscv" in args:
+        run(["sagevm", "compile", str(SRC_DIR / "mkfs.sage"), str(BUILD_DIR / "mkfs.sgrv"), "--riscv"])
+    
     ok()
     
     new_binary_hash = ""
@@ -240,7 +244,10 @@ def main() -> None:
     }
     if len(sys.argv) < 2 or sys.argv[1] not in commands:
         banner("SageFS — sagemake")
-        print(f"  Usage:  ./sagemake {'|'.join(commands.keys())}")
+        print(f"  Usage:  ./sagemake {'|'.join(commands.keys())} [args]")
+        print("  Options for build:")
+        print("    --build-vm-stack   Compile against SageVM stack mode")
+        print("    --build-vm-riscv   Compile against SageVM register (riscv) mode")
         print()
         sys.exit(1)
     cmd = sys.argv[1]

@@ -118,9 +118,11 @@ The result is a filesystem that delivers **superior SSD performance** with **ent
 ### Build
 
 ```bash
-# Compile the filesystem tools
-sage --compile src/mkfs.sage -o build/mkfs.sagefs -O3
-sage --compile src/fsck.sage -o build/fsck.sagefs -O3
+# Compile the filesystem tools natively
+./sagemake build
+
+# Optionally, compile against SageVM stack and register modes
+./sagemake build --build-vm-stack --build-vm-riscv
 ```
 
 ### Format a Disk Image

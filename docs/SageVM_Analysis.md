@@ -21,4 +21,4 @@ SageVM is a pure SageLang implementation of the Sage Virtual Machine (SGVM), act
 - `src/srvm/`: Source logic for the new RISC-V Register Virtual Machine, featuring the `srvm_compiler.sage`, `srvm_core.sage`, and `srvm_vm.sage`.
 
 ## Integration with SageFS
-Integrating SageVM into SageFS allows us to produce portable compiled versions of the filesystem tools (like `mkfs.sagefs`, `mount.sagefs`, etc.) in both Stack (`.sgvm`) and Register (`.sgrv`) formats. By adding these compilation steps to `sagemake`, we can ship SageVM-compatible binaries alongside the standard native executables.
+Integrating SageVM into SageFS allows us to produce portable compiled versions of the filesystem tools (like `mkfs.sagefs`, `mount.sagefs`, etc.) in both Stack (`.sgvm`) and Register (`.sgrv`) formats. We have added these compilation steps to `sagemake` using the `--build-vm-stack` and `--build-vm-riscv` flags, enabling the delivery of SageVM-compatible binaries alongside the standard native executables.
