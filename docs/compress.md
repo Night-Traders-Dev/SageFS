@@ -1,15 +1,20 @@
-# Transparent Compression Engine
+# Transparent Compression
+**Module:** [`src/compress.sage`](../src/compress.sage) · **Phase:** 4 (Advanced) · **Status:** ✅ Implemented
 
-## Overview
-The Transparent Compression Engine performs cluster-based compression (compressing N blocks into M blocks).
+## Purpose
+Provides transparent inline block compression for data. Supports configurable algorithms based on data temperature (hot vs cold).
 
-## Key Features
-- **Tiered Algorithms**:
-  - `lz4` for hot data (fastest).
-  - `zstd` for cold data (best ratio).
-  - `zlib` for compatibility fallback.
-- **Dynamic Selection**: Per-file, per-directory, or temperature-based selection.
-- **Incompressible Data Detection**: Automatically skips compression if the data is incompressible.
+## Algorithms
+- `lz4` - Fast, for hot data.
+- `zstd` - High ratio, for cold archival data.
+- `zlib` - Fallback compatibility.
+- `none` - No compression.
 
-## Implementation (Phase 4)
-*In Progress*
+## API
+- `select_algorithm(temperature)`
+- `compress_cluster(data, algo) -> Bytes`
+- `decompress_cluster(data, algo) -> Bytes`
+- `is_incompressible(original_size, compressed_size) -> Bool`
+
+## Related
+[allocator.md](allocator.md) · [inode.md](inode.md)

@@ -17,11 +17,15 @@ This directory contains per-component design and API documentation for SageFS. E
 | [checksum.md](checksum.md) | `src/checksum.sage` | 3 | ✅ Implemented |
 | [journal.md](journal.md) | `src/journal.sage`, `src/transaction.sage` | 3 | ✅ Implemented |
 | [fsck.md](fsck.md) | `src/fsck.sage` | 3 | ✅ Implemented |
-| [snapshot.md](snapshot.md) | `src/snapshot.sage` | 4 | 🚧 In Progress |
-| [compress.md](compress.md) | `src/compress.sage` | 4 | 🚧 In Progress |
-| [dedup.md](dedup.md) | `src/dedup.sage` | 4 | 🚧 In Progress |
-| [encrypt.md](encrypt.md) | `src/encrypt.sage` | 4 | 🚧 In Progress |
-| [raid.md](raid.md) | `src/raid.sage` | 4 | 🚧 In Progress |
+| [snapshot.md](snapshot.md) | `src/snapshot.sage` | 4 | ✅ Implemented |
+| [compress.md](compress.md) | `src/compress.sage` | 4 | ✅ Implemented |
+| [dedup.md](dedup.md) | `src/dedup.sage` | 4 | ✅ Implemented |
+| [encrypt.md](encrypt.md) | `src/encrypt.sage` | 4 | ✅ Implemented |
+| [xattr.md](xattr.md) | `src/xattr.sage` | 4 | ✅ Implemented |
+| [gc.md](gc.md) | `src/gc.sage` | 5 | ✅ Implemented |
+| [cache.md](cache.md) | `src/cache.sage` | 5 | ✅ Implemented |
+| [aio.md](aio.md) | `src/aio.sage` | 5 | ✅ Implemented |
+| [raid.md](raid.md) | `src/raid.sage` | 6 | ✅ Implemented |
 
 ## Reading Order
 
@@ -42,7 +46,11 @@ For newcomers, we recommend reading the documentation in dependency order:
 13. **[compress.md](compress.md)** — transparent data compression
 14. **[dedup.md](dedup.md)** — inline and background deduplication
 15. **[encrypt.md](encrypt.md)** — file and filename encryption
-16. **[raid.md](raid.md)** — multi-device integration and parity
+16. **[xattr.md](xattr.md)** — extended attributes
+17. **[gc.md](gc.md)** — garbage collection and valid block tracking
+18. **[cache.md](cache.md)** — NAT, extent, and node caches
+19. **[aio.md](aio.md)** — async I/O engine
+20. **[raid.md](raid.md)** — multi-device integration and parity
 
 ## Conventions
 
