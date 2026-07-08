@@ -11,10 +11,19 @@
 ##   - ChecksumTree serialize -> deserialize round-trip
 ## ============================================================================
 
-from checksum import crc32c, xxhash32, checksum_block, verify_block
-from checksum import CHECKSUM_CRC32C, CHECKSUM_XXHASH, CHECKSUM_SHA256
-from checksum import ChecksumTree, ChecksumPolicy, default_policy
-from checksum import sha256_hex, sha256_fold32
+import checksum
+let crc32c = checksum.crc32c
+let xxhash32 = checksum.xxhash32
+let checksum_block = checksum.checksum_block
+let verify_block = checksum.verify_block
+let CHECKSUM_CRC32C = checksum.CHECKSUM_CRC32C
+let CHECKSUM_XXHASH = checksum.CHECKSUM_XXHASH
+let CHECKSUM_SHA256 = checksum.CHECKSUM_SHA256
+let ChecksumTree = checksum.ChecksumTree
+let ChecksumPolicy = checksum.ChecksumPolicy
+let default_policy = checksum.default_policy
+let sha256_hex = checksum.sha256_hex
+let sha256_fold32 = checksum.sha256_fold32
 
 var TESTS_RUN: Int = 0
 var TESTS_PASSED: Int = 0

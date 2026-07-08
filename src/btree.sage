@@ -24,35 +24,13 @@ let BTREE_NODE_SIZE: Int = 4096
 let BTREE_MAGIC: Int = 0x42545245
 let BTREE_MAX_KEYS: Int = 168
 
-## Mock BlockAllocator to satisfy compiler since it's an external dependency.
-## In a real implementation, this interacts with the disk block manager.
-class BlockAllocator:
-    init():
-        pass
-        
-    proc alloc_block(self) -> Int:
-        # Dummy allocator
-        return 0
-        
-    proc free_block(self, addr: Int):
-        pass
-        
-    proc write_block(self, addr: Int, data: Bytes):
-        pass
-        
-    proc read_block(self, addr: Int) -> Bytes:
-        return bytes()
 
 ## BTreeKey represents a 128-bit key in the B+ tree.
 ## - object_id: 64-bit (e.g., inode number)
 ## - type: 8-bit (e.g., DIR_ITEM, EXTENT_ITEM)
 ## - offset: 56-bit (e.g., hash for dir item, or file offset for extent)
 class BTreeKey:
-    var object_id: Int
-    var type: Int
-    var offset: Int
-
-    init(object_id: Int, type: Int, offset: Int):
+    proc init(self, object_id: Int, type: Int, offset: Int):
         self.object_id = object_id
         self.type = type
         self.offset = offset
@@ -82,28 +60,24 @@ class BTreeKey:
         
         # Pack object_id (64-bit, big-endian)
         for i in range(8):
-            push(b, (self.object_id >> (56 - i * 8)) & 0xFF)
+            bytes_push(b, (self.object_id >> (56 - i * 8)) & 0xFF)
             
         # Pack type (8-bit)
-        push(b, self.type & 0xFF)
+        bytes_push(b, self.type & 0xFF)
         
         # Pack offset (56-bit, big-endian)
         for i in range(7):
-            push(b, (self.offset >> (48 - i * 8)) & 0xFF)
+            bytes_push(b, (self.offset >> (48 - i * 8)) & 0xFF)
             
         return b
 
-    proc to_string(self) -> str:
+    proc to_string(self) -> String:
         return "BTreeKey(" + str(self.object_id) + ", " + str(self.type) + ", " + str(self.offset) + ")"
 
 
 ## BTreeItem points to data within a leaf node's data area.
 class BTreeItem:
-    var key: BTreeKey
-    var data_offset: Int
-    var data_size: Int
-
-    init(key: BTreeKey, data_offset: Int, data_size: Int):
+    proc init(self, key: BTreeKey, data_offset: Int, data_size: Int):
         self.key = key
         self.data_offset = data_offset
         self.data_size = data_size
@@ -111,11 +85,7 @@ class BTreeItem:
 
 ## BTreePointer points to a child node in an internal node.
 class BTreePointer:
-    var key: BTreeKey
-    var block_addr: Int
-    var generation: Int
-
-    init(key: BTreeKey, block_addr: Int, generation: Int):
+    proc init(self, key: BTreeKey, block_addr: Int, generation: Int):
         self.key = key
         self.block_addr = block_addr
         self.generation = generation
@@ -123,28 +93,14 @@ class BTreePointer:
 
 ## Represents the result of a node split
 class SplitResult:
-    var node: BTreeNode
-    var median_key: BTreeKey
-    
-    init(node: BTreeNode, median_key: BTreeKey):
+    proc init(self, node: BTreeNode, median_key: BTreeKey):
         self.node = node
         self.median_key = median_key
 
 
 ## BTreeNode is the core building block of the B+ tree.
 class BTreeNode:
-    var is_leaf: Bool
-    var num_items: Int
-    var level: Int
-    var generation: Int
-    var owner_nid: Int
-    var block_addr: Int
-    
-    var items: [BTreeItem]
-    var pointers: [BTreePointer]
-    var data_area: Bytes
-    
-    init():
+    proc init(self):
         self.is_leaf = true
         self.num_items = 0
         self.level = 0
@@ -161,13 +117,13 @@ class BTreeNode:
         
         # Serialize magic number
         for i in range(4):
-            push(b, (BTREE_MAGIC >> (24 - i * 8)) & 0xFF)
+            bytes_push(b, (BTREE_MAGIC >> (24 - i * 8)) & 0xFF)
             
         # Serialize node metadata flags
         if self.is_leaf:
-            push(b, 1)
+            bytes_push(b, 1)
         else:
-            push(b, 0)
+            bytes_push(b, 0)
             
         # Note: A full implementation would carefully pack self.num_items,
         # self.level, self.generation, all items/pointers, and the data_area.
@@ -208,16 +164,16 @@ class BTreeNode:
             item.data_offset = bytes_len(self.data_area)
             item.data_size = bytes_len(data)
             for i in range(bytes_len(data)):
-                push(self.data_area, bytes_get(data, i))
+                bytes_push(self.data_area, bytes_get(data, i))
             return
-            
+        
         # Calculate offset in data_area for new data
         let data_offset = bytes_len(self.data_area)
         let data_size = bytes_len(data)
         
         # Append data to the end of data_area
         for i in range(data_size):
-            push(self.data_area, bytes_get(data, i))
+            bytes_push(self.data_area, bytes_get(data, i))
             
         let new_item = BTreeItem(key, data_offset, data_size)
         
@@ -275,11 +231,7 @@ class BTreeNode:
 
 ## BTreeEngine orchestrates copy-on-write B+ tree operations.
 class BTreeEngine:
-    var allocator: BlockAllocator
-    var root_block: Int
-    var current_generation: Int
-
-    init(allocator: BlockAllocator, root_block: Int, gen: Int):
+    proc init(self, allocator, root_block: Int, gen: Int):
         self.allocator = allocator
         self.root_block = root_block
         self.current_generation = gen
@@ -320,7 +272,7 @@ class BTreeEngine:
             
         # Copy data area
         for i in range(bytes_len(node.data_area)):
-            push(new_node.data_area, bytes_get(node.data_area, i))
+            bytes_push(new_node.data_area, bytes_get(node.data_area, i))
             
         return new_node
 
@@ -347,7 +299,7 @@ class BTreeEngine:
             let item = curr_node.items[idx]
             let val = bytes()
             for i in range(item.data_size):
-                push(val, bytes_get(curr_node.data_area, item.data_offset + i))
+                bytes_push(val, bytes_get(curr_node.data_area, item.data_offset + i))
             return val
             
         return bytes()
@@ -395,7 +347,7 @@ class BTreeEngine:
     proc delete(self, key: BTreeKey):
         # A full CoW delete involves recursive traversal, CoW of path nodes,
         # removal of the target item, and potentially merging underflowed nodes.
-        pass
+        return
 
     ## Update data for an existing key.
     proc update(self, key: BTreeKey, new_data: Bytes):

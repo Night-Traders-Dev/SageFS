@@ -9,7 +9,7 @@ class EncryptionLayer:
         # In a real implementation, we use Argon2 or PBKDF2 to derive 
         # a unique key for the inode from the master key + salt
         if not dict_has(self.inode_keys, ino):
-            self.inode_keys[ino] = "key_for_" + to_string(ino)
+            self.inode_keys[ino] = "key_for_" + str(ino)
         return self.inode_keys[ino]
         
     proc encrypt_data(self, data: Bytes, ino: Int, offset: Int) -> Bytes:

@@ -11,10 +11,17 @@
 ##   - nested transactions: nested abort poisons the outer txn
 ## ============================================================================
 
-from journal import Journal, JournalRecord
-from journal import REC_UPDATE, REC_COMMIT, JREC_HEADER_SIZE, JREC_CKSUM_OFF
-from journal import jread_le32, jread_le64
-from transaction import TransactionManager
+import journal
+import transaction
+let Journal = journal.Journal
+let JournalRecord = journal.JournalRecord
+let REC_UPDATE = journal.REC_UPDATE
+let REC_COMMIT = journal.REC_COMMIT
+let JREC_HEADER_SIZE = journal.JREC_HEADER_SIZE
+let JREC_CKSUM_OFF = journal.JREC_CKSUM_OFF
+let jread_le32 = journal.jread_le32
+let jread_le64 = journal.jread_le64
+let TransactionManager = transaction.TransactionManager
 
 var TESTS_RUN: Int = 0
 var TESTS_PASSED: Int = 0
@@ -41,24 +48,22 @@ proc check_bool(name: String, got: Bool, expected: Bool):
 
 class MemDevice:
     ## A trivial block device backed by a dict of block_addr -> Bytes.
-    var blocks: Dict[Int, Bytes]
-    var block_size: Int
 
     proc init(self, block_size: Int):
         self.blocks = {}
         self.block_size = block_size
 
     proc write_block(self, block_addr: Int, data: Bytes):
-        self.blocks[block_addr] = data
+        self.blocks[str(block_addr)] = data
 
     proc read_block(self, block_addr: Int) -> Bytes:
-        if dict_has(self.blocks, block_addr):
-            return self.blocks[block_addr]
+        if dict_has(self.blocks, str(block_addr)):
+            return self.blocks[str(block_addr)]
         ## Unwritten blocks read back as zeros.
         let z: Bytes = bytes()
         var i: Int = 0
         while i < self.block_size:
-            push(z, 0)
+            bytes_push(z, 0)
             i = i + 1
         return z
 
@@ -114,8 +119,8 @@ proc test_recover_commit_abort():
     check("applied blocks", applied, 2)
     check("block 100 written", block_first_byte(dev, 100), 65)   # 'A'
     check("block 101 written", block_first_byte(dev, 101), 66)   # 'B'
-    check_bool("block 200 NOT written", dict_has(dev.blocks, 200), false)
-    check_bool("block 300 NOT written", dict_has(dev.blocks, 300), false)
+    check_bool("block 200 NOT written", dict_has(dev.blocks, str(200)), false)
+    check_bool("block 300 NOT written", dict_has(dev.blocks, str(300)), false)
 
 proc test_txn_manager_commit():
     print("TransactionManager commit applies updates:")
@@ -142,7 +147,7 @@ proc test_txn_manager_abort():
     tm.stage_update(20, bytes("ZZZZ"))
     let ok: Bool = tm.abort()
     check_bool("abort returned true", ok, true)
-    check_bool("block 20 NOT applied", dict_has(dev.blocks, 20), false)
+    check_bool("block 20 NOT applied", dict_has(dev.blocks, str(20)), false)
 
 proc test_nested_abort_poisons():
     print("Nested transactions: inner abort poisons outer commit:")
@@ -158,8 +163,8 @@ proc test_nested_abort_poisons():
     check("depth back to 1", tm.depth(), 1)
     let ok: Bool = tm.commit()       # outer commit should become an abort
     check_bool("poisoned commit returns false", ok, false)
-    check_bool("block 30 NOT applied", dict_has(dev.blocks, 30), false)
-    check_bool("block 31 NOT applied", dict_has(dev.blocks, 31), false)
+    check_bool("block 30 NOT applied", dict_has(dev.blocks, str(30)), false)
+    check_bool("block 31 NOT applied", dict_has(dev.blocks, str(31)), false)
 
 proc test_nested_commit_applies():
     print("Nested transactions: clean nested commit applies all:")

@@ -25,7 +25,6 @@
 ## on-disk format is portable across architectures.
 ## ============================================================================
 
-import crypto.hash
 import sys
 
 # ---------------------------------------------------------------------------
@@ -123,14 +122,14 @@ let STATE_ERROR: Int = 2
 proc write_le64(buf: Bytes, value: Int):
     ## Write a 64-bit integer to `buf` in little-endian order (8 bytes).
     ## Each byte is extracted via mask-and-shift.
-    push(buf, value & 0xFF)
-    push(buf, (value >> 8) & 0xFF)
-    push(buf, (value >> 16) & 0xFF)
-    push(buf, (value >> 24) & 0xFF)
-    push(buf, (value >> 32) & 0xFF)
-    push(buf, (value >> 40) & 0xFF)
-    push(buf, (value >> 48) & 0xFF)
-    push(buf, (value >> 56) & 0xFF)
+    bytes_push(buf, value & 0xFF)
+    bytes_push(buf, (value >> 8) & 0xFF)
+    bytes_push(buf, (value >> 16) & 0xFF)
+    bytes_push(buf, (value >> 24) & 0xFF)
+    bytes_push(buf, (value >> 32) & 0xFF)
+    bytes_push(buf, (value >> 40) & 0xFF)
+    bytes_push(buf, (value >> 48) & 0xFF)
+    bytes_push(buf, (value >> 56) & 0xFF)
 
 proc read_le64(buf: Bytes, offset: Int) -> Int:
     ## Read a 64-bit little-endian integer from `buf` starting at `offset`.
@@ -146,10 +145,10 @@ proc read_le64(buf: Bytes, offset: Int) -> Int:
 
 proc write_le32(buf: Bytes, value: Int):
     ## Write a 32-bit integer to `buf` in little-endian order (4 bytes).
-    push(buf, value & 0xFF)
-    push(buf, (value >> 8) & 0xFF)
-    push(buf, (value >> 16) & 0xFF)
-    push(buf, (value >> 24) & 0xFF)
+    bytes_push(buf, value & 0xFF)
+    bytes_push(buf, (value >> 8) & 0xFF)
+    bytes_push(buf, (value >> 16) & 0xFF)
+    bytes_push(buf, (value >> 24) & 0xFF)
 
 proc read_le32(buf: Bytes, offset: Int) -> Int:
     ## Read a 32-bit little-endian integer from `buf` starting at `offset`.
@@ -166,9 +165,9 @@ proc write_bytes_padded(buf: Bytes, data: String, padded_len: Int):
     var written: Int = 0
     while written < padded_len:
         if written < bytes_len(data_bytes):
-            push(buf, bytes_get(data_bytes, written))
+            bytes_push(buf, bytes_get(data_bytes, written))
         else:
-            push(buf, 0)
+            bytes_push(buf, 0)
         written = written + 1
 
 proc read_bytes_string(buf: Bytes, offset: Int, max_len: Int) -> String:
@@ -244,7 +243,7 @@ proc compute_layout(total_blocks: Int, block_size: Int, segment_size: Int) -> Di
     ## filesystem can address every block/segment in the volume.
 
     ## Number of segments in the entire volume (round down)
-    let total_segments: Int = total_blocks / segment_size
+    let total_segments: Int = int(total_blocks / segment_size)
 
     ## Reserve first 8 blocks for superblocks (2) + checkpoint packs (up to 6)
     let reserved_blocks: Int = 8
@@ -256,10 +255,10 @@ proc compute_layout(total_blocks: Int, block_size: Int, segment_size: Int) -> Di
     ## ------------------------------------------------------------------
     let sit_entry_size: Int = 64
     let sit_bytes: Int = total_segments * sit_entry_size
-    var sit_blocks: Int = sit_bytes / block_size
+    var sit_blocks: Int = int(sit_bytes / block_size)
     if sit_bytes % block_size != 0:
         sit_blocks = sit_blocks + 1
-    var sit_segments: Int = sit_blocks / segment_size
+    var sit_segments: Int = int(sit_blocks / segment_size)
     if sit_blocks % segment_size != 0:
         sit_segments = sit_segments + 1
     ## Minimum 1 segment for SIT
@@ -271,13 +270,13 @@ proc compute_layout(total_blocks: Int, block_size: Int, segment_size: Int) -> Di
     ## total_blocks / 4 inodes (conservative upper bound) with 16 bytes
     ## per NAT entry (nid, block_addr, version, padding).
     ## ------------------------------------------------------------------
-    let max_nodes: Int = total_blocks / 4
+    let max_nodes: Int = int(total_blocks / 4)
     let nat_entry_size: Int = 16
     let nat_bytes: Int = max_nodes * nat_entry_size
-    var nat_blocks: Int = nat_bytes / block_size
+    var nat_blocks: Int = int(nat_bytes / block_size)
     if nat_bytes % block_size != 0:
         nat_blocks = nat_blocks + 1
-    var nat_segments: Int = nat_blocks / segment_size
+    var nat_segments: Int = int(nat_blocks / segment_size)
     if nat_blocks % segment_size != 0:
         nat_segments = nat_segments + 1
     if nat_segments < 1:
@@ -292,7 +291,7 @@ proc compute_layout(total_blocks: Int, block_size: Int, segment_size: Int) -> Di
     var ssa_blocks: Int = estimated_main_segments
     if ssa_blocks < 1:
         ssa_blocks = 1
-    var ssa_segments: Int = ssa_blocks / segment_size
+    var ssa_segments: Int = int(ssa_blocks / segment_size)
     if ssa_blocks % segment_size != 0:
         ssa_segments = ssa_segments + 1
     if ssa_segments < 1:
@@ -624,6 +623,36 @@ class SageFSSuperblock:
         s = s + "  state:           " + str(self.state) + "\n"
         s = s + "  checksum:        0x" + str(self.checksum) + "\n"
         return s
+
+proc deserialize_superblock(buf: Bytes) -> SageFSSuperblock:
+    let sb: SageFSSuperblock = SageFSSuperblock()
+    sb.magic         = read_le32(buf, 0)
+    sb.version_major = read_le32(buf, 4)
+    sb.version_minor = read_le32(buf, 8)
+    sb.block_size    = read_le32(buf, 12)
+    sb.segment_size  = read_le32(buf, 16)
+    sb.total_segments   = read_le64(buf, 20)
+    sb.total_blocks     = read_le64(buf, 28)
+    sb.free_segments    = read_le64(buf, 36)
+    sb.root_inode       = read_le64(buf, 44)
+    sb.checkpoint_ver   = read_le64(buf, 52)
+    sb.nat_start_blk    = read_le64(buf, 60)
+    sb.sit_start_blk    = read_le64(buf, 68)
+    sb.ssa_start_blk    = read_le64(buf, 76)
+    sb.main_start_blk   = read_le64(buf, 84)
+    sb.uuid         = read_bytes_string(buf, 92, 36)
+    sb.label        = read_bytes_string(buf, 128, MAX_LABEL_LEN)
+    sb.flags        = read_le32(buf, 384)
+    sb.checksum_algo  = read_le32(buf, 388)
+    sb.compress_algo  = read_le32(buf, 392)
+    sb.encryption_algo = read_le32(buf, 396)
+    sb.raid_level    = read_le32(buf, 400)
+    sb.create_time   = read_le64(buf, 404)
+    sb.mount_count   = read_le32(buf, 412)
+    sb.max_mount_count = read_le32(buf, 416)
+    sb.state         = read_le32(buf, 420)
+    sb.checksum      = read_le32(buf, 424)
+    return sb
 
 # ===========================================================================
 # SageFSCheckpoint
@@ -1060,7 +1089,7 @@ proc create_superblock(total_blocks: Int, label: String, block_size: Int, segmen
     sb.total_segments = total_segments
 
     ## Free segments = total minus metadata overhead
-    let main_start_seg: Int = layout["main_start"] / segment_size
+    let main_start_seg: Int = int(layout["main_start"] / segment_size)
     sb.free_segments = total_segments - main_start_seg
     if sb.free_segments < 0:
         sb.free_segments = 0

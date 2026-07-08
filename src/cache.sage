@@ -48,7 +48,7 @@ class LRUCache:
         if len(self.order) > 0:
             let lru_key = self.order[0]
             let new_order = []
-            for i in 1..len(self.order)-1:
+            for i in range(1, len(self.order)):
                 push(new_order, self.order[i])
             self.order = new_order
             dict_delete(self.cache, lru_key)
@@ -61,34 +61,34 @@ class CacheManager:
         
     # NAT Cache
     proc get_nat(self, nid: Int) -> Int:
-        let key = to_string(nid)
+        let key = str(nid)
         let val = self.nat_cache.get(key)
         if val != nil:
-            return val as Int
+            return val
         return -1
         
     proc put_nat(self, nid: Int, block_addr: Int):
-        self.nat_cache.put(to_string(nid), block_addr)
+        self.nat_cache.put(str(nid), block_addr)
         
     # Extent Cache
     proc get_extent(self, ino: Int, logical_block: Int) -> Int:
-        let key = to_string(ino) + ":" + to_string(logical_block)
+        let key = str(ino) + ":" + str(logical_block)
         let val = self.extent_cache.get(key)
         if val != nil:
-            return val as Int
+            return val
         return -1
         
     proc put_extent(self, ino: Int, logical_block: Int, physical_block: Int):
-        let key = to_string(ino) + ":" + to_string(logical_block)
+        let key = str(ino) + ":" + str(logical_block)
         self.extent_cache.put(key, physical_block)
         
     # Node Cache (B+ tree nodes)
     proc get_node(self, block_addr: Int) -> Bytes:
-        let key = to_string(block_addr)
+        let key = str(block_addr)
         let val = self.node_cache.get(key)
         if val != nil:
-            return val as Bytes
+            return val
         return bytes()
         
     proc put_node(self, block_addr: Int, data: Bytes):
-        self.node_cache.put(to_string(block_addr), data)
+        self.node_cache.put(str(block_addr), data)

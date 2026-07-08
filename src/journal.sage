@@ -69,12 +69,6 @@ let REC_CHECKPOINT: Int = 5   # checkpoint barrier (log may be truncated here)
 
 class JournalRecord:
     ## A single write-ahead-log record.
-    var magic: Int
-    var lsn: Int
-    var txn_id: Int
-    var rec_type: Int
-    var target_blk: Int
-    var payload: Bytes
 
     proc init(self, lsn: Int, txn_id: Int, rec_type: Int, target_blk: Int, payload: Bytes):
         self.magic = JOURNAL_MAGIC
@@ -110,7 +104,7 @@ class JournalRecord:
         var i: Int = 0
         let n: Int = bytes_len(self.payload)
         while i < n:
-            push(buf, bytes_get(self.payload, i))
+            bytes_push(buf, bytes_get(self.payload, i))
             i = i + 1
 
         ## Compute checksum over the whole buffer (checksum field currently 0)
@@ -132,18 +126,6 @@ class Journal:
     ##     read_block(block_addr: Int) -> Bytes
     ## matching the BlockAllocator/device abstraction used elsewhere.  For unit
     ## testing an in-memory device is sufficient.
-    var device: Any
-    var start_blk: Int          # first block of the journal region
-    var block_count: Int        # size of the region in blocks
-    var block_size: Int         # bytes per block
-
-    var next_lsn: Int           # next LSN to assign
-    var next_txn_id: Int        # next transaction id to assign
-
-    ## In-memory staging buffer for the current log tail.  Records are packed
-    ## contiguously here and flushed to the device on `sync()`.
-    var buffer: Bytes
-    var head_lsn: Int           # LSN of the oldest still-needed record
 
     proc init(self, device: Any, start_blk: Int, block_count: Int, block_size: Int):
         self.device = device
@@ -204,7 +186,7 @@ class Journal:
         var i: Int = 0
         let n: Int = bytes_len(encoded)
         while i < n:
-            push(self.buffer, bytes_get(encoded, i))
+            bytes_push(self.buffer, bytes_get(encoded, i))
             i = i + 1
         return lsn
 
@@ -231,9 +213,9 @@ class Journal:
             var j: Int = 0
             while j < self.block_size:
                 if off + j < total:
-                    push(chunk, bytes_get(self.buffer, off + j))
+                    bytes_push(chunk, bytes_get(self.buffer, off + j))
                 else:
-                    push(chunk, 0)
+                    bytes_push(chunk, 0)
                 j = j + 1
             self.device.write_block(blk, chunk)
             off = off + self.block_size
@@ -257,8 +239,9 @@ class Journal:
         let total: Int = bytes_len(raw)
 
         var records: Array = []
-        var committed: Dict[Int, Bool] = {}
-        var aborted: Dict[Int, Bool] = {}
+        var records: Array = []
+        var committed: Dict[String, Bool] = {}
+        var aborted: Dict[String, Bool] = {}
 
         var off: Int = 0
         while off + JREC_HEADER_SIZE <= total:
@@ -286,12 +269,12 @@ class Journal:
             let payload: Bytes = jslice(raw, off + JREC_HEADER_SIZE, off + rec_total)
 
             let rec: JournalRecord = JournalRecord(lsn, txn_id, rec_type, target_blk, payload)
-            records.push(rec)
+            push(records, rec)
 
             if rec_type == REC_COMMIT:
-                committed[txn_id] = true
+                committed[str(txn_id)] = true
             elif rec_type == REC_ABORT:
-                aborted[txn_id] = true
+                aborted[str(txn_id)] = true
 
             off = off + rec_total
 
@@ -300,8 +283,8 @@ class Journal:
         var redo: Array = []
         for rec in records:
             if rec.rec_type == REC_UPDATE:
-                if dict_has(committed, rec.txn_id) and not dict_has(aborted, rec.txn_id):
-                    redo.push(rec)
+                if dict_has(committed, str(rec.txn_id)) and not dict_has(aborted, str(rec.txn_id)):
+                    push(redo, rec)
         return redo
 
     proc replay(self) -> Int:
@@ -325,7 +308,7 @@ class Journal:
             var i: Int = 0
             let n: Int = bytes_len(chunk)
             while i < n:
-                push(buf, bytes_get(chunk, i))
+                bytes_push(buf, bytes_get(chunk, i))
                 i = i + 1
             blk = blk + 1
             read = read + 1
@@ -351,20 +334,20 @@ class Journal:
 # ===========================================================================
 
 proc jwrite_le32(buf: Bytes, value: Int):
-    push(buf, value & 0xFF)
-    push(buf, (value >> 8) & 0xFF)
-    push(buf, (value >> 16) & 0xFF)
-    push(buf, (value >> 24) & 0xFF)
+    bytes_push(buf, value & 0xFF)
+    bytes_push(buf, (value >> 8) & 0xFF)
+    bytes_push(buf, (value >> 16) & 0xFF)
+    bytes_push(buf, (value >> 24) & 0xFF)
 
 proc jwrite_le64(buf: Bytes, value: Int):
-    push(buf, value & 0xFF)
-    push(buf, (value >> 8) & 0xFF)
-    push(buf, (value >> 16) & 0xFF)
-    push(buf, (value >> 24) & 0xFF)
-    push(buf, (value >> 32) & 0xFF)
-    push(buf, (value >> 40) & 0xFF)
-    push(buf, (value >> 48) & 0xFF)
-    push(buf, (value >> 56) & 0xFF)
+    bytes_push(buf, value & 0xFF)
+    bytes_push(buf, (value >> 8) & 0xFF)
+    bytes_push(buf, (value >> 16) & 0xFF)
+    bytes_push(buf, (value >> 24) & 0xFF)
+    bytes_push(buf, (value >> 32) & 0xFF)
+    bytes_push(buf, (value >> 40) & 0xFF)
+    bytes_push(buf, (value >> 48) & 0xFF)
+    bytes_push(buf, (value >> 56) & 0xFF)
 
 proc jread_le32(buf: Bytes, offset: Int) -> Int:
     let b0: Int = bytes_get(buf, offset)
@@ -396,6 +379,6 @@ proc jslice(buf: Bytes, start: Int, end: Int) -> Bytes:
     let out: Bytes = bytes()
     var i: Int = start
     while i < end:
-        push(out, bytes_get(buf, i))
+        bytes_push(out, bytes_get(buf, i))
         i = i + 1
     return out

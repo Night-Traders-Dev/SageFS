@@ -14,7 +14,7 @@ class RaidEngine:
         
     proc write_block(self, logical_addr: Int, data: Bytes):
         # map logical_addr, generate parity if needed, write to disks
-        pass
+        return
         
     proc scrub(self) -> Bool:
         # verify parity across all stripes

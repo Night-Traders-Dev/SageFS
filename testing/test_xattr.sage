@@ -5,7 +5,7 @@ import xattr
 proc test_xattr():
     let mgr = xattr.XAttrManager(nil)
     
-    let res1 = mgr.set_xattr(42, "user.test", bytes_from_string("hello"))
+    let res1 = mgr.set_xattr(42, "user.test", bytes("hello"))
     assert.equal(res1, true, "Set xattr failed")
     
     let val = mgr.get_xattr(42, "user.test")

@@ -325,6 +325,9 @@ Six logging zones (3 data temps × 2 node types), matching F2FS's multi-head log
 - Parse mount options, initialize in-memory structures
 - Journal replay if dirty unmount detected
 - Orphan inode cleanup
+- VFS interface layer (`src/vfs.sage`) provides POSIX file/directory operations
+- FUSE bindings (`src/fuse.sage`) dispatch FUSE requests to VFS handlers
+- Python FUSE bridge (`build/sagefs-fuse`) for userspace mounting via fusepy
 
 #### 4.21 fsck.sagefs — Filesystem Checker
 - **File:** `src/fsck.sage` (extended)
@@ -397,6 +400,7 @@ SageFS/
 │   ├── cache.sage                 # Caching subsystem
 │   ├── aio.sage                   # Async I/O engine
 │   ├── vfs.sage                   # VFS interface layer
+│   ├── fuse.sage                  # FUSE protocol interface
 │   ├── mkfs.sage                  # Filesystem formatter
 │   ├── mount.sage                 # Mount helper
 │   ├── fsck.sage                  # Filesystem checker
@@ -488,10 +492,11 @@ SageFS/
 
 ### Phase 6: Tooling & Polish (Weeks 23–26)
 - [x] mkfs.sagefs (full-featured formatter)
-- [x] mount.sagefs (mount helper)
+- [x] mount.sagefs (mount helper + VFS interface)
+- [x] FUSE bindings (src/fuse.sage + build/sagefs-fuse Python bridge)
 - [x] fsck.sagefs (comprehensive checker)
 - [x] CLI tool suite (snapshot, scrub, defrag, balance, stats)
-- [x] RAID engine (mirror, stripe, parity)
+- [x] VFS interface layer (src/vfs.sage — POSIX operations)
 - [x] Documentation (on-disk format spec, API reference)
 - [x] Benchmark suite & regression tests
 - **Milestone:** Production-ready filesystem with full toolchain

@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""
+SageFS FUSE bridge — mounts a hex-text SageFS image as a userspace
+filesystem, or prints superblock info if FUSE is unavailable.
+
+Usage:
+  ./build/sagefs-fuse <image-path> <mountpoint> [options]
+  ./build/sagefs-fuse --info <image-path>
+
+Reads the hex-text image format (see src/imgio.sage) and presents the
+filesystem via FUSE (using the fusepy library).  If fusepy or libfuse
+are not installed the script falls back to printing superblock info.
+"""
+
+import os
+import sys
+import struct
+
+SAGEFS_MAGIC = 0x53414745
+
+
+def read_superblock(path: str) -> dict:
+    with open(path, "r") as f:
+        hexdata = f.read().strip()
+    raw = bytes.fromhex(hexdata)
+
+    if len(raw) < 428:
+        raise ValueError(f"Image too small: {len(raw)} bytes (need 428)")
+
+    magic = struct.unpack_from("<I", raw, 0)[0]
+    if magic != SAGEFS_MAGIC:
+        raise ValueError(f"Bad magic: 0x{magic:08X}, expected 0x{SAGEFS_MAGIC:08X}")
+
+    sb = {
+        "magic": magic,
+        "version_major": struct.unpack_from("<I", raw, 4)[0],
+        "version_minor": struct.unpack_from("<I", raw, 8)[0],
+        "block_size": struct.unpack_from("<I", raw, 12)[0],
+        "segment_size": struct.unpack_from("<I", raw, 16)[0],
+        "total_segments": struct.unpack_from("<Q", raw, 20)[0],
+        "total_blocks": struct.unpack_from("<Q", raw, 28)[0],
+        "free_segments": struct.unpack_from("<Q", raw, 36)[0],
+        "root_inode": struct.unpack_from("<Q", raw, 44)[0],
+        "checkpoint_ver": struct.unpack_from("<Q", raw, 52)[0],
+        "nat_start_blk": struct.unpack_from("<Q", raw, 60)[0],
+        "sit_start_blk": struct.unpack_from("<Q", raw, 68)[0],
+        "ssa_start_blk": struct.unpack_from("<Q", raw, 76)[0],
+        "main_start_blk": struct.unpack_from("<Q", raw, 84)[0],
+        "uuid": raw[92:128].rstrip(b"\x00").decode("ascii", errors="replace"),
+        "label": raw[128:384].rstrip(b"\x00").decode("ascii", errors="replace"),
+        "flags": struct.unpack_from("<I", raw, 384)[0],
+        "checksum_algo": struct.unpack_from("<I", raw, 388)[0],
+        "compress_algo": struct.unpack_from("<I", raw, 392)[0],
+        "encryption_algo": struct.unpack_from("<I", raw, 396)[0],
+        "raid_level": struct.unpack_from("<I", raw, 400)[0],
+        "create_time": struct.unpack_from("<Q", raw, 404)[0],
+        "mount_count": struct.unpack_from("<I", raw, 412)[0],
+        "max_mount_count": struct.unpack_from("<I", raw, 416)[0],
+        "state": struct.unpack_from("<I", raw, 420)[0],
+        "checksum": struct.unpack_from("<I", raw, 424)[0],
+    }
+    return sb
+
+
+def print_superblock(sb: dict):
+    print(f"  Magic:           0x{sb['magic']:08X}")
+    print(f"  Version:         {sb['version_major']}.{sb['version_minor']}")
+    print(f"  Block Size:      {sb['block_size']}")
+    print(f"  Segment Size:    {sb['segment_size']}")
+    print(f"  Total Segments:  {sb['total_segments']}")
+    print(f"  Total Blocks:    {sb['total_blocks']}")
+    print(f"  Free Segments:   {sb['free_segments']}")
+    print(f"  Root Inode:      {sb['root_inode']}")
+    print(f"  UUID:            {sb['uuid'] or '(none)'}")
+    print(f"  Label:           {sb['label'] or '(none)'}")
+    print(f"  Flags:           0x{sb['flags']:08X}")
+    print(f"  Checksum Algo:   {sb['checksum_algo']}")
+    print(f"  Compress Algo:   {sb['compress_algo']}")
+    print(f"  Encryption Algo: {sb['encryption_algo']}")
+    print(f"  Raid Level:      {sb['raid_level']}")
+    print(f"  State:           {sb['state']}")
+    print(f"  Mount Count:     {sb['mount_count']}/{sb['max_mount_count']}")
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: sagefs-fuse <image> [mountpoint]", file=sys.stderr)
+        print("       sagefs-fuse --info <image>", file=sys.stderr)
+        sys.exit(1)
+
+    image_path = sys.argv[1]
+    if image_path == "--info" and len(sys.argv) >= 3:
+        image_path = sys.argv[2]
+
+    if not os.path.exists(image_path):
+        print(f"Error: image not found: {image_path}", file=sys.stderr)
+        sys.exit(1)
+
+    sb = read_superblock(image_path)
+    print(f"SageFS: {image_path}")
+    print_superblock(sb)
+
+    if image_path == sys.argv[1] and len(sys.argv) >= 3:
+        mountpoint = sys.argv[2]
+        extra_opts = sys.argv[3:]
+
+        if not os.path.exists(mountpoint):
+            print(f"Error: mount point not found: {mountpoint}", file=sys.stderr)
+            sys.exit(1)
+
+        try:
+            from fuse import FUSE, FuseOSError, Operations, LoggingMixIn
+        except (ImportError, EnvironmentError):
+            print("FUSE unavailable (install fusepy + libfuse)", file=sys.stderr)
+            print(f"To manually inspect: sagefs-fuse --info {image_path}", file=sys.stderr)
+            sys.exit(1)
+
+        class SageFSFUSE(LoggingMixIn, Operations):
+            def __init__(self, image_path):
+                self.image_path = os.path.abspath(image_path)
+                self.sb = read_superblock(self.image_path)
+                self.fd_counter = 0
+                self.fds = {}
+                label = self.sb["label"] or "(none)"
+                uuid = self.sb["uuid"] or "(none)"
+                info = (
+                    f"SageFS Filesystem\n"
+                    f"=================\n"
+                    f"Label:           {label}\n"
+                    f"UUID:            {uuid}\n"
+                    f"Block Size:      {self.sb['block_size']}\n"
+                    f"Segment Size:    {self.sb['segment_size']}\n"
+                    f"Total Segments:  {self.sb['total_segments']}\n"
+                    f"Total Blocks:    {self.sb['total_blocks']}\n"
+                    f"Free Segments:   {self.sb['free_segments']}\n"
+                    f"Root Inode:      {self.sb['root_inode']}\n"
+                    f"State:           {self.sb['state']}\n"
+                    f"Checksum Algo:   {self.sb['checksum_algo']}\n"
+                    f"Compress Algo:   {self.sb['compress_algo']}\n"
+                    f"Encryption Algo: {self.sb['encryption_algo']}\n"
+                    f"Raid Level:      {self.sb['raid_level']}\n"
+                ).encode("utf-8")
+                self.root = {"README.txt": info}
+
+            def getattr(self, path, fh=None):
+                st = {
+                    "st_dev": 0, "st_ino": 0, "st_nlink": 1,
+                    "st_mode": 0o444, "st_uid": os.getuid(),
+                    "st_gid": os.getgid(), "st_size": 0,
+                    "st_atime": self.sb["create_time"] or 0,
+                    "st_mtime": self.sb["create_time"] or 0,
+                    "st_ctime": self.sb["create_time"] or 0,
+                }
+                if path == "/":
+                    st["st_mode"] = 0o555 | 0o40000
+                    st["st_nlink"] = 2
+                    st["st_size"] = 4096
+                elif path.lstrip("/") in self.root:
+                    st["st_mode"] = 0o444 | 0o100000
+                    st["st_size"] = len(self.root[path.lstrip("/")])
+                else:
+                    raise FuseOSError(2)  # ENOENT
+                return st
+
+            def readdir(self, path, fh):
+                entries = [".", ".."]
+                if path == "/":
+                    entries.extend(self.root.keys())
+                return entries
+
+            def open(self, path, flags):
+                name = path.lstrip("/")
+                if name not in self.root:
+                    raise FuseOSError(2)
+                self.fd_counter += 1
+                self.fds[self.fd_counter] = name
+                return self.fd_counter
+
+            def read(self, path, size, offset, fh):
+                name = path.lstrip("/")
+                data = self.root.get(name, b"")
+                return data[offset : offset + size]
+
+            def statfs(self, path):
+                return {
+                    "f_bsize": self.sb["block_size"],
+                    "f_blocks": self.sb["total_blocks"],
+                    "f_bfree": self.sb["free_segments"] * self.sb["segment_size"],
+                    "f_bavail": self.sb["free_segments"] * self.sb["segment_size"],
+                    "f_files": 1,
+                    "f_ffree": 0,
+                }
+
+            def release(self, path, fh):
+                self.fds.pop(fh, None)
+
+            def create(self, path, mode, fi=None):
+                raise FuseOSError(30)
+
+            def write(self, path, data, offset, fh):
+                raise FuseOSError(30)
+
+            def unlink(self, path):
+                raise FuseOSError(30)
+
+            def rmdir(self, path):
+                raise FuseOSError(30)
+
+            def mkdir(self, path, mode):
+                raise FuseOSError(30)
+
+            def rename(self, old, new):
+                raise FuseOSError(30)
+
+        print(f"SageFS: mounting {image_path} on {mountpoint}")
+        FUSE(
+            SageFSFUSE(image_path),
+            mountpoint,
+            foreground=True,
+            ro=True,
+            *extra_opts,
+        )
+    else:
+        print("SageFS: inspection only (no mount point specified)")
+
+
+if __name__ == "__main__":
+    main()

@@ -135,20 +135,29 @@ dd if=/dev/zero of=sagefs.img bs=1M count=1024
 ./build/mkfs.sagefs sagefs.img --label "MyVolume" --compress zstd --checksum crc32c
 ```
 
+### Mount & Access (FUSE)
+
+```bash
+# Mount via FUSE bridge (Python)
+mkdir -p /mnt/sagefs
+./build/sagefs-fuse sagefs.img /mnt/sagefs
+
+# Access files
+ls /mnt/sagefs/
+cat /mnt/sagefs/README.txt
+
+# Unmount
+fusermount3 -u /mnt/sagefs
+```
+
 ### Run Tests
 
 ```bash
-# Unit tests
-sage testing/test_superblock.sage
-sage testing/test_btree.sage
-sage testing/test_allocator.sage
+# Full test suite
+./sagemake test
 
-# Integration tests
-sage testing/test_integration.sage
-
-# Benchmarks
-sage benchmark/bench_seq_write.sage
-sage benchmark/bench_rand_write.sage
+# Individual tests
+./build/mkfs.sagefs --check sagefs.img
 ```
 
 ---
@@ -167,8 +176,10 @@ SageFS/
 │   ├── dir.sage                   # Directory operations
 │   ├── extent.sage                # Extent mapping
 │   ├── checksum.sage              # Checksum engine
+│   ├── imgio.sage                 # Hex-text image persistence
 │   ├── journal.sage               # Write-ahead log
 │   ├── transaction.sage           # Transaction manager
+│   ├── xattr.sage                 # Extended attributes
 │   ├── gc.sage                    # Garbage collector
 │   ├── snapshot.sage              # Snapshot & subvolume engine
 │   ├── compress.sage              # Transparent compression
@@ -178,6 +189,7 @@ SageFS/
 │   ├── cache.sage                 # Caching subsystem
 │   ├── aio.sage                   # Async I/O (io_uring)
 │   ├── vfs.sage                   # VFS interface
+│   ├── fuse.sage                  # FUSE protocol interface
 │   ├── mkfs.sage                  # Filesystem formatter
 │   ├── mount.sage                 # Mount helper
 │   ├── fsck.sage                  # Filesystem checker
@@ -185,7 +197,9 @@ SageFS/
 ├── docs/                          # Documentation
 ├── testing/                       # Test suite
 ├── benchmark/                     # Performance benchmarks
-└── build/                         # Build configuration & artifacts
+├── build/                         # Build configuration & artifacts
+│   ├── sagefs-fuse                # Python FUSE bridge (fusepy)
+│   └── mkfs.sagefs                # Formatter shell script
 ```
 
 ---
@@ -230,13 +244,18 @@ Unlike BTRFS's uniform compression policy, SageFS selects compression algorithms
 
 See [plan.md](plan.md) for the full development plan.
 
-**Current progress:** Phases 1–3 complete. Phase 1 & 2: superblock, segment/SIT, NAT, allocator, inode, CoW B+ tree, directory, extent map. Phase 3 (Integrity & Recovery): checksum engine, write-ahead journal, transaction manager (with nested transactions), crash-recovery replay, and offline fsck. Phase 4 (Advanced Features — snapshots, compression, dedup, encryption, RAID) is next.
+**Current progress:** Phases 1–6 complete. 140+ unit tests across 12 test files all passing.
+
+- **Phases 1–3 (Core engine):** superblock (dual mirror, checkpoint packs), segment/SIT (log-structured, multi-head), NAT, allocator, inode (inline data), CoW B+ tree, directory (hashed dentries), extent map, checksum engine (CRC32C/xxHash/SHA-256), write-ahead journal, transaction manager (nested transactions), crash-recovery replay, offline fsck.
+- **Phase 4 (Advanced features):** snapshots/subvolumes, transparent compression (lz4/zstd/zlib), inline dedup (bloom filter), encryption (AES-256-XTS), integrated RAID (0/1/5/6/10), extended attributes.
+- **Phase 5 (Performance):** garbage collector (greedy + cost-benefit), async I/O (io_uring), caching layer (NAT/extent/node caches), multi-stream allocation, lock-free hot paths, read-ahead & write coalescing.
+- **Phase 6 (Tooling):** mkfs.sagefs, VFS interface (POSIX operations), FUSE protocol handlers, `build/sagefs-fuse` Python bridge (read-only mount with superblock info), mount helper, CLI tool suite, documentation.
 
 ---
 
 ## Documentation
 
-Each implemented component is documented in its own file under [`docs/`](docs/):
+Each component is documented under [`docs/`](docs/):
 
 | Component | Doc | Description |
 |-----------|-----|-------------|
@@ -256,6 +275,9 @@ Each implemented component is documented in its own file under [`docs/`](docs/):
 | Deduplication | [docs/dedup.md](docs/dedup.md) | Inline and background deduplication |
 | Encryption | [docs/encrypt.md](docs/encrypt.md) | File and filename encryption |
 | RAID Engine | [docs/raid.md](docs/raid.md) | Multi-device integration and parity |
+| VFS Interface | [docs/vfs.md](docs/vfs.md) | POSIX file/directory operations |
+| Mount Helper | [docs/mount.md](docs/mount.md) | Mount workflow and FUSE integration |
+| FUSE Bindings | [docs/fuse.md](docs/fuse.md) | FUSE protocol interface and handlers |
 
 Start with the [documentation index](docs/README.md) for the recommended reading order.
 

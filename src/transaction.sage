@@ -43,8 +43,6 @@ let TXN_ABORTED: Int = 2
 
 class StagedUpdate:
     ## A block update buffered until the transaction commits.
-    var target_blk: Int
-    var image: Bytes
 
     proc init(self, target_blk: Int, image: Bytes):
         self.target_blk = target_blk
@@ -57,12 +55,6 @@ class StagedUpdate:
 class Transaction:
     ## A single logical transaction.  Updates are staged in memory and only
     ## written to the journal (and applied to the device) at commit time.
-    var txn_id: Int
-    var state: Int
-    var depth: Int                  # current nesting depth (1 = outermost)
-    var poisoned: Bool              # a nested abort forces the whole txn to abort
-    var updates: Array              # Array[StagedUpdate]
-    var savepoints: Array           # Array[Int] — updates length per open level
 
     proc init(self, txn_id: Int):
         self.txn_id = txn_id
@@ -84,26 +76,26 @@ class Transaction:
                 self.updates[i].image = image
                 return
             i = i + 1
-        self.updates.push(StagedUpdate(target_blk, image))
+        push(self.updates, StagedUpdate(target_blk, image))
 
     proc enter(self):
         ## Open a nested level, recording a savepoint at the current update count.
-        self.savepoints.push(len(self.updates))
+        push(self.savepoints, len(self.updates))
         self.depth = self.depth + 1
 
     proc leave_commit(self):
         ## Close a nested level successfully (no journal write yet).
         if len(self.savepoints) > 0:
-            self.savepoints.pop()
+            pop(self.savepoints)
         self.depth = self.depth - 1
 
     proc leave_abort(self):
         ## Close a nested level, rolling staged updates back to its savepoint
         ## and poisoning the whole transaction.
         if len(self.savepoints) > 0:
-            let sp: Int = self.savepoints.pop()
+            let sp: Int = pop(self.savepoints)
             while len(self.updates) > sp:
-                self.updates.pop()
+                pop(self.updates)
         self.poisoned = true
         self.depth = self.depth - 1
 
@@ -116,9 +108,6 @@ class TransactionManager:
     ## Coordinates transactions against a journal and a device.
     ##
     ## `device` must expose `write_block(block_addr, data)`.
-    var journal: Any                # Journal instance
-    var device: Any
-    var current: Any                # the in-flight Transaction, or nil
 
     proc init(self, journal: Any, device: Any):
         self.journal = journal

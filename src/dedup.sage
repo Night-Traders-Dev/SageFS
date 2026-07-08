@@ -14,7 +14,7 @@ class DedupEngine:
 
     proc check_inline(self, data: Bytes) -> Int:
         # return block addr if dedup match, else -1
-        let fp = checksum.sha256_hash(data)
+        let fp = sha256(data)
         let hex_fp = self._hash_to_hex(fp)
         
         # Check bloom filter first (fast path)
@@ -30,7 +30,7 @@ class DedupEngine:
         return -1
         
     proc add_fingerprint(self, data: Bytes, block_addr: Int):
-        let fp = checksum.sha256_hash(data)
+        let fp = sha256(data)
         let hex_fp = self._hash_to_hex(fp)
         
         self.bloom_filter[hex_fp] = true

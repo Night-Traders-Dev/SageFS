@@ -28,7 +28,7 @@ proc test_cache_manager():
     assert.equal(mgr.get_extent(50, 1), -1, "Extent miss failed")
     
     # Node
-    let data = bytes_from_string("node data")
+    let data = bytes("node data")
     mgr.put_node(9000, data)
     let res = mgr.get_node(9000)
     assert.equal(len(res), 9, "Node get failed")

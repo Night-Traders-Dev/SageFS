@@ -26,6 +26,9 @@ This directory contains per-component design and API documentation for SageFS. E
 | [cache.md](cache.md) | `src/cache.sage` | 5 | ✅ Implemented |
 | [aio.md](aio.md) | `src/aio.sage` | 5 | ✅ Implemented |
 | [raid.md](raid.md) | `src/raid.sage` | 6 | ✅ Implemented |
+| [vfs.md](vfs.md) | `src/vfs.sage` | 6 | ✅ Implemented |
+| [mount.md](mount.md) | `src/mount.sage` | 6 | ✅ Implemented |
+| [fuse.md](fuse.md) | `src/fuse.sage` | 6 | ✅ Implemented |
 
 ## Reading Order
 
@@ -51,6 +54,9 @@ For newcomers, we recommend reading the documentation in dependency order:
 18. **[cache.md](cache.md)** — NAT, extent, and node caches
 19. **[aio.md](aio.md)** — async I/O engine
 20. **[raid.md](raid.md)** — multi-device integration and parity
+21. **[vfs.md](vfs.md)** — virtual filesystem interface and POSIX operations
+22. **[mount.md](mount.md)** — mount helper and FUSE bridge
+23. **[fuse.md](fuse.md)** — FUSE protocol interface
 
 ## Conventions
 

@@ -166,7 +166,11 @@ class NATEntry:
     ## Returns:
     ##   A 16-byte Bytes buffer
     proc serialize(self) -> Bytes:
-        let buf = bytes(nil, NAT_ENTRY_SIZE)
+        let buf: Bytes = bytes()
+        var pad: Int = 0
+        while pad < NAT_ENTRY_SIZE:
+            bytes_push(buf, 0)
+            pad = pad + 1
         # Write nid as 8 bytes (little-endian)
         let nid_val = self.nid
         for i in range(8):

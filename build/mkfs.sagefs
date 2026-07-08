@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec sage --runtime bytecode "/home/kraken/Devel/SageFS/src/mkfs.sage" "$@"

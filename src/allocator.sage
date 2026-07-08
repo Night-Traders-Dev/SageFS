@@ -124,7 +124,7 @@ class AllocationResult:
 ##   Segment type string, e.g. "data_hot" or "node_cold".
 ##   Returns "data_warm" as a safe default for unrecognized temperatures.
 proc map_temperature_to_seg_type(temp: String, is_node: Bool) -> String:
-    let prefix = "data_"
+    var prefix = "data_"
     if is_node:
         prefix = "node_"
 
@@ -278,7 +278,7 @@ class BlockAllocator:
 
         # Step 4: Record the mapping in the NAT
         try:
-            self.nat_table.set_mapping(nid, physical_blk)
+            self.nat_table.update(nid, physical_blk)
         catch e:
             # Roll back: if we can't record the mapping, the nid and block
             # are leaked unless we release them. Best-effort cleanup.
@@ -286,7 +286,7 @@ class BlockAllocator:
                 self.nat_table.free_nid(nid)
             catch inner_e:
                 # Ignore cleanup failure — will be recovered by fsck
-                pass
+                return AllocationResult(ALLOC_ERROR)
             return AllocationResult(ALLOC_ERROR)
 
         # Step 5: Compute segment number and offset for the result.
@@ -303,7 +303,8 @@ class BlockAllocator:
             # Non-fatal: we have the allocation, just can't decompose
             # the address. This should never happen but we degrade
             # gracefully rather than failing the allocation.
-            pass
+            segno = -1
+            block_offset = -1
 
         # Build the successful result
         let result = AllocationResult(ALLOC_SUCCESS)
@@ -336,7 +337,7 @@ class BlockAllocator:
         # Step 1: Look up the physical address via NAT
         var physical_blk = -1
         try:
-            physical_blk = self.nat_table.get_physical(nid)
+            physical_blk = self.nat_table.lookup(nid)
             if physical_blk < 0:
                 # nid not found in NAT — double-free or corruption
                 return false
@@ -449,7 +450,7 @@ class BlockAllocator:
     proc lookup_physical(self, nid: Int) -> Int:
         self.stats_reads = self.stats_reads + 1
         try:
-            let physical = self.nat_table.get_physical(nid)
+            let physical = self.nat_table.lookup(nid)
             return physical
         catch e:
             return -1

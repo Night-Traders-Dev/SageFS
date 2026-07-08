@@ -1,6 +1,5 @@
 import io
 import math
-import crypto.hash
 
 ## Maximum allowed length for a filename
 let MAX_NAME_LEN: Int = 255
@@ -24,12 +23,6 @@ let DT_SOCK: Int = 12
 class DirEntry:
     ## Represents a single directory entry within SageFS.
     ## Stores metadata and the filename, which is useful for inline and B-tree storage.
-    
-    var hash: Int
-    var ino: Int
-    var name_len: Int
-    var type: Int
-    var name: String
 
     proc init(self, hash: Int, ino: Int, name_len: Int, type: Int, name: String):
         ## Initialize a new directory entry
@@ -52,15 +45,12 @@ class DirEntry:
     proc deserialize(self, data: Bytes):
         ## Deserialize a directory entry from a binary format.
         # This is a placeholder for deserialization logic
-        pass
+        return
 
 
 class DirManager:
     ## Manages directories, directory entries, and namespaces in SageFS.
     ## Capable of handling inline directories for small directories and B-tree backed blocks for large ones.
-    
-    var inode_mgr: Any
-    var btree_engine: Any
 
     proc init(self, inode_mgr: Any, btree_engine: Any):
         ## Initialize the directory manager with references to the inode manager and b-tree engine.
@@ -73,7 +63,7 @@ class DirManager:
         var h: Int = 2166136261
         for i in range(len(name)):
             # Cast character to integer and update hash
-            h = (h ^ int(name[i])) * 16777619
+            h = (h ^ ord(name[i])) * 16777619
         return h & 0xFFFFFFFF
 
     proc add_entry(self, dir_ino: Int, name: String, ino: Int, type: Int) -> Bool:

@@ -49,6 +49,31 @@ def run(cmd: list[str], cwd: Path = None) -> None:
     except FileNotFoundError:
         step_fail(f"command not found: {cmd[0]}")
 
+def run_checked(cmd: list[str], cwd: Path = None) -> bool:
+    """Run a command; return True on success, False on failure (no exit)."""
+    try:
+        subprocess.run(cmd, cwd=cwd, check=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+def write_vm_wrapper(wrapper_path: Path, main_source: Path) -> None:
+    """Write a small executable wrapper that runs the program.
+
+    The SageVM runner (`sagevm run`) loads trailing CLI tokens as additional
+    modules rather than passing them to the program, so program arguments
+    cannot reach `sys.args()` that way.  We therefore execute the compiled
+    source through the `sage` runtime, which does forward arguments to
+    `sys.args()`.  The bundled `mkfs.sgvm` remains the compiled build artifact.
+    """
+    src = main_source.resolve()
+    script = (
+        "#!/usr/bin/env bash\n"
+        f'exec sage --runtime bytecode "{src}" "$@"\n'
+    )
+    wrapper_path.write_text(script, encoding="utf-8")
+    wrapper_path.chmod(0o755)
+
 # ── Project config ────────────────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parent
 BUILD_DIR = ROOT / "build"
@@ -134,15 +159,34 @@ def cmd_build(args: list[str]) -> None:
             
     step("compiling source")
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
-    
-    run(["sage", "--compile", str(SRC_DIR / "mkfs.sage"), "-o", str(BUILD_DIR / BINARY_NAME), "-O3"])
+
+    # Full filesystem build: bundle and validate the ENTIRE component graph.
+    run(["sagevm", "compile", str(SRC_DIR / "all.sage"), str(BUILD_DIR / "sagefs_full.sgvm")])
+
+    # Primary entry binary: try the native C backend first; it is unavailable
+    # in this SageLang build because it does not implement `Bytes` code
+    # generation (every `bytes*` builtin fails with "unknown call target ...
+    # in compiled code"). Fall back to the SageVM backend, which supports
+    # `Bytes`, and emit a runnable wrapper that executes the entry through the
+    # `sage` bytecode runtime (the only execution path that forwards CLI args
+    # to sys.args()).
+    native_ok = run_checked([
+        "sage", "--compile", str(SRC_DIR / "mkfs.sage"),
+        "-o", str(BUILD_DIR / BINARY_NAME), "-O3",
+    ])
+    if not native_ok:
+        step_warn("native compile unavailable for Bytes; using SageVM backend")
+        vm_bin = BUILD_DIR / "mkfs.sgvm"
+        run(["sagevm", "compile", str(SRC_DIR / "mkfs.sage"), str(vm_bin)])
+        write_vm_wrapper(BUILD_DIR / BINARY_NAME, SRC_DIR / "mkfs.sage")
+
     run(["sage", "--emit-c", str(SRC_DIR / "vfs.sage"), "-o", str(BUILD_DIR / "sagefs_vfs.c")])
-    
+
     if "--build-vm-stack" in args:
         run(["sagevm", "compile", str(SRC_DIR / "mkfs.sage"), str(BUILD_DIR / "mkfs.sgvm")])
     if "--build-vm-riscv" in args:
         run(["sagevm", "compile", str(SRC_DIR / "mkfs.sage"), str(BUILD_DIR / "mkfs.sgrv"), "--riscv"])
-    
+
     ok()
     
     new_binary_hash = ""
@@ -171,19 +215,41 @@ def cmd_test(args: list[str]) -> None:
         step_warn("No test files found in testing/")
         return
         
+    total_pass = 0
+    total_fail = 0
     for test_file in test_files:
         step(f"Running {test_file.name}")
         try:
-            subprocess.run(["sage", "--runtime", "bytecode", str(test_file)], check=True, capture_output=True)
-            ok()
-        except subprocess.CalledProcessError as e:
-            fail()
-            print(e.stderr.decode() if e.stderr else e.stdout.decode())
-            sys.exit(1)
+            cmd = [
+                "sage", "--runtime", "bytecode",
+                "-I", str(SRC_DIR),
+                str(test_file),
+            ]
+            result = subprocess.run(
+                cmd, cwd=SRC_DIR, capture_output=True, text=True,
+            )
+            stdout = result.stdout or ""
+            stderr = result.stderr or ""
+            # Detect failures via exit code OR failure patterns in output
+            has_fail = "FAIL" in stdout or "SOME TESTS FAILED" in stdout
+            if result.returncode != 0 or has_fail:
+                fail()
+                if stdout.strip():
+                    print(f"\n{stdout.strip()}")
+                if stderr.strip():
+                    print(f"\n{stderr.strip()}")
+                total_fail += 1
+            else:
+                ok()
+                if stdout.strip():
+                    print(f"    {stdout.strip()}")
+                total_pass += 1
         except FileNotFoundError:
             step_fail("sage command not found")
-            
-    step_ok("all tests passed")
+
+    if total_fail > 0:
+        step_fail(f"{total_fail} test file(s) failed, {total_pass} passed")
+    step_ok(f"all {total_pass} test file(s) passed")
 
 def cmd_install(args: list[str]) -> None:
     banner("install — SageFS")
@@ -197,6 +263,11 @@ def cmd_install(args: list[str]) -> None:
         shutil.copy2(BUILD_DIR / BINARY_NAME, target)
         if os.name != "nt":
             target.chmod(0o755)
+        # When the build fell back to the SageVM backend, BINARY_NAME is a
+        # wrapper that execs the VM binary — copy that alongside it.
+        vm_bin = BUILD_DIR / "mkfs.sgvm"
+        if vm_bin.exists() and vm_bin.resolve() != (BUILD_DIR / BINARY_NAME).resolve():
+            shutil.copy2(vm_bin, install_dir / "mkfs.sgvm")
     except PermissionError:
         step_fail("permission denied (try running as Administrator/root)")
     except Exception as e:

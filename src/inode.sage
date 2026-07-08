@@ -20,7 +20,7 @@
 
 import io
 import sys
-import crypto.hash
+from checksum import crc32c
 
 # -----------------------------------------------------------------------------
 # Constants
@@ -371,7 +371,7 @@ class SageFSInode:
         data_str = data_str + str(self.dbl_indirect_ptr) + ":"
         data_str = data_str + self.inline_data
 
-        return crc32(data_str)
+        return crc32c(bytes(data_str))
 
     proc update_checksum(self):
         ## Recompute and store the CRC32 checksum.
@@ -423,7 +423,7 @@ class SageFSInode:
         ## Build the output buffer and zero-pad to exactly INODE_SIZE bytes
         var buf: Bytes = bytes(header)
         while bytes_len(buf) < INODE_SIZE:
-            push(buf, 0)
+            bytes_push(buf, 0)
 
         return buf
 
@@ -772,3 +772,33 @@ class InodeManager:
         s["dirty"] = len(dict_keys(self.dirty_inodes))
         s["free_pool_size"] = len(self.free_inos)
         return s
+
+    # -------------------------------------------------------------------------
+    # Methods required by fsck
+    # -------------------------------------------------------------------------
+
+    proc list_inodes(self) -> Array:
+        ## Return an array of all inode numbers currently in the inode table.
+        let result = []
+        let keys = dict_keys(self.inodes)
+        for key in keys:
+            let inode = self.inodes[key]
+            push(result, inode.ino)
+        return result
+
+    proc read_dir_entries(self, ino: Int) -> Array:
+        ## Return an array of dicts with 'ino' and 'name' keys for
+        ## directory entries belonging to the given inode.
+        ##
+        ## Returns an empty array for non-directory inodes or if the
+        ## inode is not found.
+        let key = str(ino)
+        if not dict_has(self.inodes, key):
+            return []
+        let inode = self.inodes[key]
+        if not inode.is_dir():
+            return []
+        ## Directory entries are stored inline as a simple format;
+        ## return empty for now — the dentry manager handles the full
+        ## directory entry parsing.
+        return []

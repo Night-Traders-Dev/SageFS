@@ -51,12 +51,6 @@ let ISSUE_BLOCK_CHECKSUM: Int = 7     # data/metadata block checksum mismatch
 # ===========================================================================
 
 class FsckIssue:
-    var code: Int
-    var severity: Int
-    var target: Int        # inode / nid / segno / block the issue concerns
-    var message: String
-    var repaired: Bool
-
     proc init(self, code: Int, severity: Int, target: Int, message: String):
         self.code = code
         self.severity = severity
@@ -83,11 +77,6 @@ class FsckIssue:
 # ===========================================================================
 
 class FsckReport:
-    var issues: Array          # Array[FsckIssue]
-    var inodes_scanned: Int
-    var blocks_scanned: Int
-    var repaired_count: Int
-
     proc init(self):
         self.issues = []
         self.inodes_scanned = 0
@@ -142,12 +131,6 @@ class Fsck:
     ## in-memory image or a freshly loaded on-disk volume.  All arguments may
     ## be nil except `superblock`; checks depending on a missing manager are
     ## skipped.
-    var sb: Any                # SageFSSuperblock
-    var inodes: Any            # InodeManager
-    var nat: Any               # NodeAddressTable
-    var sit: Any               # SegmentManager
-    var csum_tree: Any         # ChecksumTree (optional)
-    var repair: Bool
 
     proc init(self, sb: Any, inodes: Any, nat: Any, sit: Any, csum_tree: Any, repair: Bool):
         self.sb = sb

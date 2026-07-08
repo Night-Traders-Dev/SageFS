@@ -239,7 +239,11 @@ class SITEntry:
     ## Returns:
     ##   Bytes buffer of SIT_ENTRY_SIZE (72) bytes.
     proc serialize(self) -> Bytes:
-        let buf = bytes(nil, SIT_ENTRY_SIZE)
+        let buf: Bytes = bytes()
+        var pad: Int = 0
+        while pad < SIT_ENTRY_SIZE:
+            bytes_push(buf, 0)
+            pad = pad + 1
 
         # Write segno as 4 bytes, little-endian
         bytes_set(buf, 0, self.segno & 0xFF)
@@ -335,6 +339,7 @@ class SegmentManager:
             raise "SegmentManager: total_segments " + str(total_segments) + " exceeds MAX_SIT_ENTRIES " + str(MAX_SIT_ENTRIES)
 
         self.total_segments = total_segments
+        self.blocks_per_segment = BLOCKS_PER_SEGMENT
         self.block_size = block_size
         self.main_start_blk = main_start_blk
 
@@ -587,7 +592,7 @@ class SegmentManager:
     ## Returns:
     ##   Count of segments where 0 < valid_blocks < BLOCKS_PER_SEGMENT.
     proc dirty_segment_count(self) -> Int:
-        let count = 0
+        var count = 0
         for i in range(self.total_segments):
             let entry = self.sit_entries[i]
             if entry.valid_blocks > 0 and entry.valid_blocks < BLOCKS_PER_SEGMENT:
@@ -699,6 +704,15 @@ class SegmentManager:
     ##   Array of segment numbers that are classified as the given type
     ##   and have at least one valid block.
     proc get_segments_by_type(self, seg_type_str: String) -> Array:
+        ## If "all" is passed, return every segment with at least one valid block.
+        if seg_type_str == "all":
+            let result = []
+            for i in range(self.total_segments):
+                let entry = self.sit_entries[i]
+                if entry.valid_blocks > 0:
+                    push(result, i)
+            return result
+
         let type_int = seg_type_to_int(seg_type_str)
         if type_int == -1:
             raise "SegmentManager.get_segments_by_type: invalid type '" + seg_type_str + "'"
@@ -772,3 +786,31 @@ class SegmentManager:
         result["segments_by_type"] = type_counts
         result["current_segments"] = self.current_segments
         return result
+
+    ## Given an absolute physical block number, compute which segment it
+    ## belongs to and its offset within that segment.
+    ##
+    ## Args:
+    ##   physical_blk: Absolute physical block address.
+    ##
+    ## Returns:
+    ##   Dict with keys:
+    ##     "segno"        — segment number containing the block
+    ##     "block_offset" — offset of the block within the segment
+    proc get_block_location(self, physical_blk: Int) -> Dict:
+        let relative_blk = physical_blk - self.main_start_blk
+        let segno = int(relative_blk / self.blocks_per_segment)
+        let block_offset = relative_blk % self.blocks_per_segment
+        let result = {}
+        result["segno"] = segno
+        result["block_offset"] = block_offset
+        return result
+
+    ## Return the percentage of free segments relative to the total.
+    ##
+    ## Returns:
+    ##   Integer percentage 0-100: (free_segments / total_segments) * 100.
+    proc free_segment_percent(self) -> Int:
+        if self.total_segments <= 0:
+            return 0
+        return int((len(self.free_segments) * 100) / self.total_segments)
