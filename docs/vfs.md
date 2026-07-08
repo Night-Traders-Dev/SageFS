@@ -15,7 +15,7 @@ The VFS operates in two modes:
 
 1. **Native (SageVM / compiled):** Direct block I/O via the core engine modules, suitable for kernel integration and high-performance native binaries. Every POSIX operation maps to a sequence of SageFS metadata mutations.
 
-2. **Python FUSE bridge:** The `build/sagefs-fuse` script reads the hex-text image format directly and provides a userspace FUSE mount. This uses the hex-text persistence layer from `src/imgio.sage`.
+2. **Python FUSE bridge:** The `build/sagefs-fuse` script reads the native binary image format directly and provides a userspace FUSE mount. This uses the binary persistence layer from `src/imgio.sage`.
 
 ## Key Data Structures
 
@@ -32,7 +32,7 @@ class FileDescriptor:
 
 ```sage
 class VFS:
-    image_path: String    # path to the hex-text image file
+    image_path: String    # path to the binary image file
     mounted: Bool          # mount state flag
     sb: SageFSSuperblock   # parsed superblock (after mount)
     fds: Array             # open file descriptor table
@@ -90,7 +90,7 @@ class VFS:
 ## Inline Data I/O
 
 The VFS reads file content directly from inode directory entries stored
-after the superblock in the hex-text image.  `read_inode_data(ino)` looks
+after the superblock in the image.  `read_inode_data(ino)` looks
 up the inode number in the in-memory inode table and returns its inline
 data buffer.  This is the F2FS-style inline data path — small files up to
 ~3.4 KiB are stored directly in the inode with zero extra block I/O.
@@ -100,7 +100,7 @@ and parsed by `VFS.mount()` using `imgio.read_inode_entries()`.
 
 ## Mount Workflow
 
-1. `VFS.mount()` reads the hex-text image via `imgio.read_image()`
+1. `VFS.mount()` reads the binary image via `imgio.read_image()`
 2. Calls `superblock.deserialize_superblock()` to parse the 428-byte superblock
 3. If the image has data beyond the superblock, reads the inode directory via `imgio.read_inode_entries()` and populates `self.inodes` and `self.dentries`
 4. Validates the magic (`0x53414745` = "SAGE") via `SAGEFS_MAGIC`
@@ -112,5 +112,5 @@ and parsed by `VFS.mount()` using `imgio.read_inode_entries()`.
 
 - `src/fuse.sage` — FUSE protocol handlers that dispatch to VFS methods
 - `src/mount.sage` — mount helper that initialises VFS and starts the FUSE bridge
-- `src/imgio.sage` — hex-text image persistence used by VFS.mount()
+- `src/imgio.sage` — binary image persistence used by VFS.mount()
 - `build/sagefs-fuse` — Python FUSE driver wrapping the VFS interface

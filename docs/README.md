@@ -56,7 +56,7 @@ For newcomers, we recommend reading the documentation in dependency order:
 19. **[aio.md](aio.md)** — async I/O engine
 20. **[raid.md](raid.md)** — multi-device integration and parity
 21. **[vfs.md](vfs.md)** — virtual filesystem interface and POSIX operations
-22. **[imgio.md](imgio.md)** — hex-text and binary image persistence
+22. **[imgio.md](imgio.md)** — binary image persistence
 23. **[mount.md](mount.md)** — mount helper and FUSE bridge
 24. **[fuse.md](fuse.md)** — FUSE protocol interface
 

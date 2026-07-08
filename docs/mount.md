@@ -47,7 +47,7 @@ mount.sage
 
 ## FUSE Bridge
 
-The `build/sagefs-fuse` script is a Python FUSE driver that mounts a SageFS hex-text image as a userspace filesystem. It reads the image directly and presents it via FUSE. This is separate from the SageLang VFS but compatible with the hex-text image format.
+The `build/sagefs-fuse` script is a Python FUSE driver that mounts a SageFS binary image as a userspace filesystem. It reads the image directly and presents it via FUSE. This is separate from the SageLang VFS but compatible with the binary image format.
 
 ### Mount Options
 
@@ -78,6 +78,6 @@ fusermount3 -u /mnt/sagefs
 
 - `src/vfs.sage` — VFS interface layer initialised during mount
 - `src/fuse.sage` — FUSE protocol handlers for operation dispatch
-- `src/imgio.sage` — hex-text image persistence
+- `src/imgio.sage` — binary image persistence
 - `src/journal.sage` — journal replay for crash recovery
 - `build/sagefs-fuse` — Python FUSE driver script

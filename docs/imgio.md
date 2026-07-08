@@ -8,18 +8,15 @@
 ## Purpose
 
 The imgio module provides the low-level I/O layer for reading and writing
-SageFS disk images.  Because the SageLang runtime does not yet implement
-binary file I/O (`io.writebytes` / `io.readbytes` return false/empty),
-images are persisted as **hexadecimal text** via `io.writefile` /
-`io.readfile`.  Swapping to native binary I/O is a one-line change once
-the toolchain supports it.
+SageFS disk images.  Images are persisted as native binary via
+`io.writebytes` / `io.readbytes`.
 
 ## API
 
 | Proc | Signature | Description |
 |------|-----------|-------------|
-| `write_image` | `(path, buf) -> Bool` | Write a `Bytes` buffer as hex text |
-| `read_image` | `(path) -> Bytes` | Read a hex-text image back to `Bytes` |
+| `write_image` | `(path, buf) -> Bool` | Write a `Bytes` buffer as native binary |
+| `read_image` | `(path) -> Bytes` | Read a native binary image back to `Bytes` |
 | `write_inode_entry` | `(buf, ino, mode, size, name, data)` | Append a binary inode directory record |
 | `read_inode_entries` | `(buf) -> Array[Dict]` | Parse all inode directory records |
 
@@ -40,11 +37,11 @@ directory entries.  Each entry is a variable-length binary record:
 
 The entry list is terminated by end-of-buffer (no length prefix).
 
-## Hex-Text Format
+## Binary Format
 
-The hex-text format is a single line of lowercase hex digits, one pair per
-byte, written via `io.writefile`.  For example, a minimal superblock hex
-image begins with `454741530000...` (SAGE magic).
+The image is a raw binary file written via `io.writebytes` and read via
+`io.readbytes`.  All multi-byte fields are little-endian.  The first 428
+bytes form the superblock, followed by zero or more inode directory entries.
 
 ## Related
 

@@ -22,7 +22,7 @@ sagefs-fuse (Python)               VFS
 
 For SageFS, the userspace FUSE daemon can run in two modes:
 
-1. **Python bridge (current):** `build/sagefs-fuse` uses `fusepy` (and falls back to `--info` if unavailable) and reads the hex-text image format directly. This is the recommended mode for the current development environment. It presents a read-only README.txt with superblock metadata.
+1. **Python bridge (current):** `build/sagefs-fuse` uses `fusepy` (and falls back to `--info` if unavailable) and reads the native binary image format directly. This is the recommended mode for the current development environment. It presents a read-only README.txt with superblock metadata.
 
 2. **SageLang native (future):** Once SageLang supports FFI calls to `libfuse3`, the `fuse.sage` module can register its handlers directly with `fuse_session_loop()`.
 
