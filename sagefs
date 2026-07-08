@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# SageFS All-in-One Tool
+# Unified interface for SageFS operations
+# Built from SageLang v4.0.3 with native binary I/O support
+
+# Configuration
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SAGEMAKE="$SCRIPT_DIR/sagemake"
+
+# Logging functions
+log() { echo -e "\033[0;32m[SageFS]\033[0m $*"; }
+error() { echo -e "\033[0;31m[Error]\033[0m $*" >&2; }
+
+# Check prerequisites
+if [[ ! -f "$SAGEMAKE" ]]; then
+    error "SageFS sagemake not found at $SAGEMAKE"
+    error "Please ensure SageFS is properly installed"
+    exit 1
+fi
+
+if [[ $# -lt 1 ]]; then
+    error "Usage: sagefs <mkfs|mount|check|version|help> [args]"
+    exit 1
+fi
+
+COMMAND="$1"
+shift
+
+case "$COMMAND" in
+    mkfs)
+        if [[ $# -lt 1 ]]; then
+            error "Missing device. Usage: sagefs mkfs <device> [--size MB] [--label NAME] [--force]"
+            exit 1
+        fi
+        log "Formatting SageFS volume on $1..."
+        "$SAGEMAKE" all --size 64 "$@"
+        ;;
+    mount)
+        if [[ $# -lt 2 ]]; then
+            error "Missing image or mountpoint. Usage: sagefs mount <image> <mountpoint> [--ro] [--allow_other]"
+            exit 1
+        fi
+        log "Mounting SageFS image $1 to $2..."
+        "$SAGEMAKE" --mount "$@"
+        ;;
+    check)
+        if [[ $# -lt 1 ]]; then
+            error "Missing image. Usage: sagefs check <image>"
+            exit 1
+        fi
+        log "Checking SageFS image $1..."
+        "$SAGEMAKE" --check "$@"
+        ;;
+    version)
+        log "SageFS All-in-One Tool v1.0.0"
+        log "Built from SageLang v4.0.3 (9c7da119)"
+        log "Runtime: SageVM v0.9.23 with SageLang v4.0.3 sync"
+        log ""
+        log "Features:"
+        log "- Native binary I/O (io.writebytes/io.readbytes)"
+        log "- Qualified type annotations (module.Type)"
+        log "- All-in-one command interface"
+        ;;
+    help|--help|-h)
+        cat << 'HELPEOF'
+SageFS All-in-One Tool v1.0.0
+A unified interface for SageFS filesystem operations
+
+USAGE:
+  sagefs <command> [args]
+
+COMMANDS:
+  mkfs <device> [--size MB] [--label NAME] [--force]    Format a new SageFS volume
+  mount <image> <mountpoint> [--ro] [--allow_other]     Mount an existing image
+  check <image>                                       Verify an existing image
+  version                                               Show version information
+  help                                                 Show this help message
+
+EXAMPLES:
+  # Format a 512MB volume
+  sagefs mkfs /dev/sda1 --size 512 --label "My SageFS Volume"
+
+  # Mount an image to /mnt
+  sagefs mount myimage.sagefs /mnt/sagefs
+
+  # Check image integrity
+  sagefs check myimage.sagefs
+
+  # Show version
+  sagefs version
+
+TECHNICAL DETAILS:
+SageFS is written in SageLang v4.0.3 (9c7da119) and provides:
+- Log-structured architecture (F2FS) with 6 log zones
+- Copy-on-write with CoW B+ trees (BTRFS)
+- Native binary I/O with Bytes type support
+- Qualified type annotations (module.Type)
+- Heap and meta-object sandboxing
+- 100% FUSE compatibility for userspace access
+
+For more information: https://github.com/Night-Traders-Dev/SageFS
+HELPEOF
+        ;;
+    *)
+        error "Unknown command: $COMMAND"
+        echo "Available commands: mkfs, mount, check, version, help"
+        exit 1
+        ;;
+esac

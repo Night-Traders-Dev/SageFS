@@ -298,6 +298,36 @@ SageFS is written in [SageLang](https://github.com/Night-Traders-Dev/SageLang), 
 
 ---
 
+## SageFS All-in-One Tool
+
+SageFS now provides a unified command-line interface for all filesystem operations through the `sagefs` tool. This All-in-One tool combines all SageFS functionality into a single executable, simplifying deployment and usage while maintaining full access to SageFS's advanced features.
+
+### Commands
+
+- `sagefs mkfs <device> [--size MB] [--label NAME] [--force]` - Format a new SageFS volume
+- `sagefs mount <image> <mountpoint> [--ro] [--allow_other]` - Mount a SageFS image
+- `sagefs check <image>` - Verify an existing image's integrity
+- `sagefs version` - Display version and configuration information
+- `sagefs help` - Show command usage and examples
+
+### Features
+
+✅ **Native binary I/O support**
+- Uses SageLang's `io.writebytes` / `io.readbytes` with `Bytes` type
+- Eliminates hex-text persistence workaround
+- Direct filesystem access for maximum performance
+
+✅ **Qualified type annotations**
+- Supports `let fs: vfs.VFS = vfs.VFS(dev)` syntax
+- Module-type declarations for better code organization
+
+✅ **Simplified deployment**
+- Single executable replaces separate `mkfs.sagefs` and `sagefs-fuse`
+- Consistent interface across all SageFS operations
+- Better integration with existing workflows
+
+---
+
 ## Contributing
 
 SageFS is in active development. Contributions welcome in:
