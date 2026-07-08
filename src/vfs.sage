@@ -53,6 +53,7 @@ class VFS:
         self.fds = []
         self.next_fd = 0
         self.dentries = []
+        self.inodes = {}
 
     proc mount(self) -> Bool:
         let raw: Bytes = imgio.read_image(self.image_path)
@@ -63,6 +64,19 @@ class VFS:
         if self.sb.magic != superblock.SAGEFS_MAGIC:
             print("VFS: bad magic 0x" + str(self.sb.magic) + " (expected 0x" + str(superblock.SAGEFS_MAGIC) + ")")
             return false
+        if bytes_len(raw) > 428:
+            let tail: Bytes = bytes()
+            var i: Int = 428
+            while i < bytes_len(raw):
+                bytes_push(tail, bytes_get(raw, i))
+                i = i + 1
+            let entries: Array = imgio.read_inode_entries(tail)
+            for entry in entries:
+                let entry_ino: Int = entry["ino"]
+                let key: String = str(entry_ino)
+                self.inodes[key] = entry
+                let name: String = entry["name"]
+                push(self.dentries, name)
         self.mounted = true
         return true
 
@@ -151,9 +165,15 @@ class VFS:
             info["size"] = 4096
             info["isdir"] = true
         else:
-            info["mode"] = S_IFREG
-            let data: Bytes = self.read_inode_data(ino)
-            info["size"] = bytes_len(data)
+            let key: String = str(ino)
+            if dict_has(self.inodes, key):
+                let entry: Dict = self.inodes[key]
+                info["mode"] = entry["mode"]
+                info["size"] = entry["size"]
+            else:
+                info["mode"] = S_IFREG
+                let data: Bytes = self.read_inode_data(ino)
+                info["size"] = bytes_len(data)
             info["isdir"] = false
         info["blocks"] = 0
         info["nlink"] = 1
@@ -177,6 +197,12 @@ class VFS:
             path = path[1:len(path)]
         for d in self.dentries:
             if d == path:
+                let entry_ino: Int = 0
+                let keys: Array = dict_keys(self.inodes)
+                for k in keys:
+                    let e: Dict = self.inodes[k]
+                    if e["name"] == path:
+                        return e["ino"]
                 return ROOT_INO + 1
         return -1
 
@@ -187,11 +213,19 @@ class VFS:
             if d == name:
                 return -1
         push(self.dentries, name)
+        let ino: Int = ROOT_INO + 1
+        var entry: Dict = {}
+        entry["ino"] = ino
+        entry["mode"] = S_IFREG | 0x1A4
+        entry["size"] = 0
+        entry["name"] = name
+        entry["data"] = ""
+        self.inodes[str(ino)] = entry
         if self.next_fd >= MAX_FDS:
             return -1
         let fd: Int = self.next_fd
         self.next_fd = self.next_fd + 1
-        push(self.fds, FileDescriptor(ROOT_INO + 1, flags, 0))
+        push(self.fds, FileDescriptor(ino, flags, 0))
         return fd
 
     proc split_path(self, path: String) -> Array[String]:
@@ -211,6 +245,11 @@ class VFS:
         return result
 
     proc read_inode_data(self, ino: Int) -> Bytes:
+        let key: String = str(ino)
+        if dict_has(self.inodes, key):
+            let entry: Dict = self.inodes[key]
+            let data_str: String = entry["data"]
+            return bytes(data_str)
         return bytes()
 
     proc mkdir(self, path: String, mode: Int) -> Bool:

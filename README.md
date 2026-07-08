@@ -275,6 +275,7 @@ Each component is documented under [`docs/`](docs/):
 | Deduplication | [docs/dedup.md](docs/dedup.md) | Inline and background deduplication |
 | Encryption | [docs/encrypt.md](docs/encrypt.md) | File and filename encryption |
 | RAID Engine | [docs/raid.md](docs/raid.md) | Multi-device integration and parity |
+| Image I/O | [docs/imgio.md](docs/imgio.md) | Hex-text & binary image persistence |
 | VFS Interface | [docs/vfs.md](docs/vfs.md) | POSIX file/directory operations |
 | Mount Helper | [docs/mount.md](docs/mount.md) | Mount workflow and FUSE integration |
 | FUSE Bindings | [docs/fuse.md](docs/fuse.md) | FUSE protocol interface and handlers |

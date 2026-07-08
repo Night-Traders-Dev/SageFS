@@ -8,29 +8,73 @@ Usage:
   ./build/sagefs-fuse --info <image-path>
 
 Reads the hex-text image format (see src/imgio.sage) and presents the
-filesystem via FUSE (using the fusepy library).  If fusepy or libfuse
-are not installed the script falls back to printing superblock info.
+filesystem via FUSE (using the fusepy library).  Supports read-write
+access: changes are serialised back to the hex-text image on unmount.
+
+If fusepy or libfuse are not installed the script falls back to printing
+superblock info.
 """
 
 import os
 import sys
 import struct
+import time
 
 SAGEFS_MAGIC = 0x53414745
+S_IFREG = 0x8000
+S_IFDIR = 0x4000
+
+
+def _read_raw(path: str) -> bytes:
+    with open(path, "r") as f:
+        hexdata = f.read().strip()
+    return bytes.fromhex(hexdata)
+
+
+def _write_raw(path: str, raw: bytes):
+    with open(path, "w") as f:
+        f.write(raw.hex())
+
+
+def read_inode_entries(raw: bytes) -> list[dict]:
+    """Parse inode directory entries after the 428-byte superblock."""
+    entries = []
+    off = 428
+    while off + 16 <= len(raw):
+        ino = struct.unpack_from("<I", raw, off)[0]
+        mode = struct.unpack_from("<I", raw, off + 4)[0]
+        size = struct.unpack_from("<I", raw, off + 8)[0]
+        name_len = struct.unpack_from("<H", raw, off + 12)[0]
+        data_len = struct.unpack_from("<H", raw, off + 14)[0]
+        entry_off = off + 16
+        if entry_off + name_len + data_len > len(raw):
+            break
+        name = raw[entry_off : entry_off + name_len].decode("ascii", errors="replace")
+        data = raw[entry_off + name_len : entry_off + name_len + data_len]
+        entries.append({"ino": ino, "mode": mode, "size": size, "name": name, "data": data})
+        off = entry_off + name_len + data_len
+    return entries
+
+
+def make_inode_entry(ino: int, mode: int, name: str, data: bytes) -> bytes:
+    """Build a binary inode directory entry."""
+    name_b = name.encode("ascii", errors="replace")
+    buf = struct.pack("<II", ino, mode)
+    buf += struct.pack("<I", len(data))
+    buf += struct.pack("<H", len(name_b))
+    buf += struct.pack("<H", len(data))
+    buf += name_b
+    buf += data
+    return buf
 
 
 def read_superblock(path: str) -> dict:
-    with open(path, "r") as f:
-        hexdata = f.read().strip()
-    raw = bytes.fromhex(hexdata)
-
+    raw = _read_raw(path)
     if len(raw) < 428:
         raise ValueError(f"Image too small: {len(raw)} bytes (need 428)")
-
     magic = struct.unpack_from("<I", raw, 0)[0]
     if magic != SAGEFS_MAGIC:
         raise ValueError(f"Bad magic: 0x{magic:08X}, expected 0x{SAGEFS_MAGIC:08X}")
-
     sb = {
         "magic": magic,
         "version_major": struct.unpack_from("<I", raw, 4)[0],
@@ -82,6 +126,22 @@ def print_superblock(sb: dict):
     print(f"  Mount Count:     {sb['mount_count']}/{sb['max_mount_count']}")
 
 
+def build_inode_directory(entries: list[dict]) -> bytes:
+    buf = b""
+    next_ino = 3
+    for entry in entries:
+        ino = entry.get("ino", next_ino)
+        if ino >= next_ino:
+            next_ino = ino + 1
+        mode = entry.get("mode", S_IFREG | 0x1A4)
+        name = entry.get("name", "")
+        data = entry.get("data", b"" if isinstance(entry.get("data"), bytes) else entry.get("data", "").encode())
+        if isinstance(data, str):
+            data = data.encode()
+        buf += make_inode_entry(ino, mode, name, data)
+    return buf
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: sagefs-fuse <image> [mountpoint]", file=sys.stderr)
@@ -121,65 +181,155 @@ def main():
                 self.sb = read_superblock(self.image_path)
                 self.fd_counter = 0
                 self.fds = {}
-                label = self.sb["label"] or "(none)"
-                uuid = self.sb["uuid"] or "(none)"
-                info = (
-                    f"SageFS Filesystem\n"
-                    f"=================\n"
-                    f"Label:           {label}\n"
-                    f"UUID:            {uuid}\n"
-                    f"Block Size:      {self.sb['block_size']}\n"
-                    f"Segment Size:    {self.sb['segment_size']}\n"
-                    f"Total Segments:  {self.sb['total_segments']}\n"
-                    f"Total Blocks:    {self.sb['total_blocks']}\n"
-                    f"Free Segments:   {self.sb['free_segments']}\n"
-                    f"Root Inode:      {self.sb['root_inode']}\n"
-                    f"State:           {self.sb['state']}\n"
-                    f"Checksum Algo:   {self.sb['checksum_algo']}\n"
-                    f"Compress Algo:   {self.sb['compress_algo']}\n"
-                    f"Encryption Algo: {self.sb['encryption_algo']}\n"
-                    f"Raid Level:      {self.sb['raid_level']}\n"
-                ).encode("utf-8")
-                self.root = {"README.txt": info}
+                self.dirty = False
+                self.next_ino = 3
+
+                raw = _read_raw(self.image_path)
+                self.inode_entries = read_inode_entries(raw)
+
+                if not self.inode_entries:
+                    self.inode_entries = []
+
+                self.inode_by_name = {}
+                for entry in self.inode_entries:
+                    name = entry["name"]
+                    self.inode_by_name[name] = entry
+                    if entry["ino"] >= self.next_ino:
+                        self.next_ino = entry["ino"] + 1
+
+            def _save(self):
+                raw = _read_raw(self.image_path)
+                superblock = raw[:428]
+                inode_dir = build_inode_directory(self.inode_entries)
+                _write_raw(self.image_path, superblock + inode_dir)
+
+            def _path_to_name(self, path):
+                return path.lstrip("/")
 
             def getattr(self, path, fh=None):
                 st = {
                     "st_dev": 0, "st_ino": 0, "st_nlink": 1,
-                    "st_mode": 0o444, "st_uid": os.getuid(),
+                    "st_mode": 0o555, "st_uid": os.getuid(),
                     "st_gid": os.getgid(), "st_size": 0,
-                    "st_atime": self.sb["create_time"] or 0,
-                    "st_mtime": self.sb["create_time"] or 0,
-                    "st_ctime": self.sb["create_time"] or 0,
+                    "st_atime": int(time.time()),
+                    "st_mtime": int(time.time()),
+                    "st_ctime": int(time.time()),
                 }
                 if path == "/":
                     st["st_mode"] = 0o555 | 0o40000
                     st["st_nlink"] = 2
                     st["st_size"] = 4096
-                elif path.lstrip("/") in self.root:
-                    st["st_mode"] = 0o444 | 0o100000
-                    st["st_size"] = len(self.root[path.lstrip("/")])
                 else:
-                    raise FuseOSError(2)  # ENOENT
+                    name = self._path_to_name(path)
+                    if name in self.inode_by_name:
+                        entry = self.inode_by_name[name]
+                        st["st_mode"] = entry["mode"]
+                        st["st_size"] = entry["size"]
+                    else:
+                        raise FuseOSError(2)
                 return st
 
             def readdir(self, path, fh):
                 entries = [".", ".."]
                 if path == "/":
-                    entries.extend(self.root.keys())
+                    for name in self.inode_by_name:
+                        entries.append(name)
                 return entries
 
             def open(self, path, flags):
-                name = path.lstrip("/")
-                if name not in self.root:
+                name = self._path_to_name(path)
+                if name not in self.inode_by_name:
                     raise FuseOSError(2)
                 self.fd_counter += 1
                 self.fds[self.fd_counter] = name
                 return self.fd_counter
 
             def read(self, path, size, offset, fh):
-                name = path.lstrip("/")
-                data = self.root.get(name, b"")
+                name = self._path_to_name(path)
+                entry = self.inode_by_name.get(name)
+                if entry is None:
+                    raise FuseOSError(2)
+                data = entry["data"]
+                if isinstance(data, str):
+                    data = data.encode()
                 return data[offset : offset + size]
+
+            def write(self, path, data, offset, fh):
+                name = self._path_to_name(path)
+                entry = self.inode_by_name.get(name)
+                if entry is None:
+                    raise FuseOSError(2)
+                existing = entry["data"]
+                if isinstance(existing, str):
+                    existing = existing.encode()
+                if offset > len(existing):
+                    existing = existing + b"\x00" * (offset - len(existing))
+                new_data = existing[:offset] + data + existing[offset + len(data):]
+                entry["data"] = new_data
+                entry["size"] = len(new_data)
+                self.dirty = True
+                return len(data)
+
+            def truncate(self, path, length, fh=None):
+                name = self._path_to_name(path)
+                entry = self.inode_by_name.get(name)
+                if entry is None:
+                    raise FuseOSError(2)
+                existing = entry["data"]
+                if isinstance(existing, str):
+                    existing = existing.encode()
+                entry["data"] = existing[:length]
+                entry["size"] = length
+                self.dirty = True
+
+            def create(self, path, mode, fi=None):
+                name = self._path_to_name(path)
+                if name in self.inode_by_name:
+                    raise FuseOSError(17)
+                ino = self.next_ino
+                self.next_ino += 1
+                entry = {"ino": ino, "mode": S_IFREG | 0x1A4, "size": 0, "name": name, "data": b""}
+                self.inode_entries.append(entry)
+                self.inode_by_name[name] = entry
+                self.dirty = True
+                self.fd_counter += 1
+                self.fds[self.fd_counter] = name
+                return self.fd_counter
+
+            def unlink(self, path):
+                name = self._path_to_name(path)
+                if name not in self.inode_by_name:
+                    raise FuseOSError(2)
+                self.inode_entries = [e for e in self.inode_entries if e["name"] != name]
+                del self.inode_by_name[name]
+                self.dirty = True
+
+            def rmdir(self, path):
+                raise FuseOSError(39)
+
+            def mkdir(self, path, mode):
+                name = self._path_to_name(path)
+                if name in self.inode_by_name:
+                    raise FuseOSError(17)
+                ino = self.next_ino
+                self.next_ino += 1
+                entry = {"ino": ino, "mode": S_IFDIR | 0x1ED, "size": 4096, "name": name, "data": b""}
+                self.inode_entries.append(entry)
+                self.inode_by_name[name] = entry
+                self.dirty = True
+
+            def rename(self, old, new):
+                old_name = self._path_to_name(old)
+                new_name = self._path_to_name(new)
+                if old_name not in self.inode_by_name:
+                    raise FuseOSError(2)
+                entry = self.inode_by_name.pop(old_name)
+                entry["name"] = new_name
+                self.inode_by_name[new_name] = entry
+                self.dirty = True
+
+            def release(self, path, fh):
+                self.fds.pop(fh, None)
 
             def statfs(self, path):
                 return {
@@ -187,37 +337,21 @@ def main():
                     "f_blocks": self.sb["total_blocks"],
                     "f_bfree": self.sb["free_segments"] * self.sb["segment_size"],
                     "f_bavail": self.sb["free_segments"] * self.sb["segment_size"],
-                    "f_files": 1,
+                    "f_files": max(self.next_ino - 1, 1),
                     "f_ffree": 0,
                 }
 
-            def release(self, path, fh):
-                self.fds.pop(fh, None)
-
-            def create(self, path, mode, fi=None):
-                raise FuseOSError(30)
-
-            def write(self, path, data, offset, fh):
-                raise FuseOSError(30)
-
-            def unlink(self, path):
-                raise FuseOSError(30)
-
-            def rmdir(self, path):
-                raise FuseOSError(30)
-
-            def mkdir(self, path, mode):
-                raise FuseOSError(30)
-
-            def rename(self, old, new):
-                raise FuseOSError(30)
+            def destroy(self, path):
+                if self.dirty:
+                    print("SageFS: writing changes to", self.image_path)
+                    self._save()
 
         print(f"SageFS: mounting {image_path} on {mountpoint}")
         FUSE(
             SageFSFUSE(image_path),
             mountpoint,
             foreground=True,
-            ro=True,
+            nothreads=True,
             *extra_opts,
         )
     else:

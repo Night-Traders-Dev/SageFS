@@ -124,6 +124,19 @@ proc format_device(dev: String, opts: Dict) -> Bool:
     let sb = superblock.create_superblock(total_blocks, opts["label"], block_size, segment_size, {"checksum_algo": superblock.CHECKSUM_CRC32C})
     let buf = sb.serialize()
 
+    let readme: String = ""
+    readme = readme + "SageFS Filesystem\n"
+    readme = readme + "=================\n"
+    readme = readme + "Label:           " + opts["label"] + "\n"
+    readme = readme + "Block Size:      " + str(block_size) + "\n"
+    readme = readme + "Segment Size:    " + str(segment_size) + "\n"
+    readme = readme + "Total Blocks:    " + str(total_blocks) + "\n"
+    readme = readme + "Free Segments:   " + str(sb.free_segments) + "\n"
+    readme = readme + "Root Inode:      " + str(sb.root_inode) + "\n"
+
+    let S_IFREG: Int = 0x8000
+    imgio.write_inode_entry(buf, 2, S_IFREG | 0x1A4, len(readme), "README.txt", readme)
+
     if io.filesize(dev) > 0 and not opts["force"]:
         print "error: " + dev + " already exists (use --force to overwrite)"
         return false

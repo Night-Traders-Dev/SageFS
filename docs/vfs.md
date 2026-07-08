@@ -87,12 +87,24 @@ class VFS:
 | S_IFDIR | 0x4000 | Directory |
 | S_IFLNK | 0xA000 | Symbolic link |
 
+## Inline Data I/O
+
+The VFS reads file content directly from inode directory entries stored
+after the superblock in the hex-text image.  `read_inode_data(ino)` looks
+up the inode number in the in-memory inode table and returns its inline
+data buffer.  This is the F2FS-style inline data path — small files up to
+~3.4 KiB are stored directly in the inode with zero extra block I/O.
+
+The inode directory is written by `mkfs.sagefs` using `imgio.write_inode_entry()`
+and parsed by `VFS.mount()` using `imgio.read_inode_entries()`.
+
 ## Mount Workflow
 
 1. `VFS.mount()` reads the hex-text image via `imgio.read_image()`
 2. Calls `superblock.deserialize_superblock()` to parse the 428-byte superblock
-3. Validates the magic (`0x53414745` = "SAGE") via `SAGEFS_MAGIC`
-4. Sets the `mounted` flag to true
+3. If the image has data beyond the superblock, reads the inode directory via `imgio.read_inode_entries()` and populates `self.inodes` and `self.dentries`
+4. Validates the magic (`0x53414745` = "SAGE") via `SAGEFS_MAGIC`
+5. Sets the `mounted` flag to true
 4. Subsequent VFS operations check `mounted` before proceeding
 5. `VFS.unmount()` clears the flag and releases resources
 
