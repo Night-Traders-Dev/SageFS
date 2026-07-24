@@ -118,12 +118,14 @@ The result is a filesystem that delivers **superior SSD performance** with **ent
 ### Build
 
 ```bash
-# Compile the filesystem tools natively
+# Compile the filesystem tools (SageVM backend — recommended)
 ./sagemake build
 
 # Optionally, compile against SageVM stack and register modes
 ./sagemake build --build-vm-stack --build-vm-riscv
 ```
+
+> **Note:** The native C backend does not support `bytes_*` builtins. `./sagemake build` automatically falls back to the SageVM bytecode backend, which fully supports all `Bytes` operations.
 
 ### Format a Disk Image
 
@@ -244,12 +246,14 @@ Unlike BTRFS's uniform compression policy, SageFS selects compression algorithms
 
 See [plan.md](plan.md) for the full development plan.
 
-**Current progress:** Phases 1–6 complete. 140+ unit tests across 12 test files all passing.
+**Current progress:** Phases 1–6 complete. 140+ unit tests across 13 test files all passing.
 
 - **Phases 1–3 (Core engine):** superblock (dual mirror, checkpoint packs), segment/SIT (log-structured, multi-head), NAT, allocator, inode (inline data), CoW B+ tree, directory (hashed dentries), extent map, checksum engine (CRC32C/xxHash/SHA-256), write-ahead journal, transaction manager (nested transactions), crash-recovery replay, offline fsck.
 - **Phase 4 (Advanced features):** snapshots/subvolumes, transparent compression (lz4/zstd/zlib), inline dedup (bloom filter), encryption (AES-256-XTS), integrated RAID (0/1/5/6/10), extended attributes.
 - **Phase 5 (Performance):** garbage collector (greedy + cost-benefit), async I/O (io_uring), caching layer (NAT/extent/node caches), multi-stream allocation, lock-free hot paths, read-ahead & write coalescing.
 - **Phase 6 (Tooling):** mkfs.sagefs, VFS interface (POSIX operations), FUSE protocol handlers, `build/sagefs-fuse` Python bridge (read-only mount with superblock info), mount helper, CLI tool suite, documentation.
+- **SageVM v1.0.0:** Updated to latest SageVM (GA) and SageLang — full test conformance, JIT engine, dual-architecture (SVM stack + SRVM RISC-V) support, security sandboxing.
+- **VFS write persistence:** Fixed `write()` to persist data to in-memory inode entries, enabling create/write/read cycles.
 
 ---
 

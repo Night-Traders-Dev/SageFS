@@ -133,6 +133,14 @@ class VFS:
         let f: FileDescriptor = self.fds[fd]
         if (f.flags & O_ACCMODE) == O_RDONLY:
             return -1
+        let key: String = str(f.ino)
+        if not dict_has(self.inodes, key):
+            return -1
+        let entry: Dict = self.inodes[key]
+        let current: String = entry["data"]
+        let data_str: String = bytes_to_string(data)
+        entry["data"] = current + data_str
+        entry["size"] = len(entry["data"])
         let written: Int = bytes_len(data)
         f.pos = f.pos + written
         return written

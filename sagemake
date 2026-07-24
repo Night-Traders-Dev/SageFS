@@ -180,7 +180,11 @@ def cmd_build(args: list[str]) -> None:
         run(["sagevm", "compile", str(SRC_DIR / "mkfs.sage"), str(vm_bin)])
         write_vm_wrapper(BUILD_DIR / BINARY_NAME, SRC_DIR / "mkfs.sage")
 
-    run(["sage", "--emit-c", str(SRC_DIR / "vfs.sage"), "-o", str(BUILD_DIR / "sagefs_vfs.c")])
+    emit_c_ok = run_checked([
+        "sage", "--emit-c", str(SRC_DIR / "vfs.sage"), "-o", str(BUILD_DIR / "sagefs_vfs.c"),
+    ])
+    if not emit_c_ok:
+        step_warn("emit-c unavailable for Bytes; skipping sagefs_vfs.c")
 
     if "--build-vm-stack" in args:
         run(["sagevm", "compile", str(SRC_DIR / "mkfs.sage"), str(BUILD_DIR / "mkfs.sgvm")])
