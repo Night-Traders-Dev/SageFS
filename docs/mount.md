@@ -34,7 +34,8 @@ mount.sage
 │      └─ ⚠️ **Requires FFI**: VFS in-memory state rebuilt each mount
 ├─ 5. Print filesystem info
 ├─ 6. Hand off to FUSE bridge
-│      └─ build/sagefs-fuse <image> <mountpoint>
+│      └─ native FFI loop via /dev/fuse (ABI 7.26)
+│      └─ fallback: Python FUSE bridge (build/sagefs-fuse)
 └─ 7. Return
 ```
 
@@ -48,7 +49,14 @@ mount.sage
 
 ## FUSE Bridge
 
-The `build/sagefs-fuse` script is a Python FUSE driver that mounts a SageFS binary image as a userspace filesystem. It reads the image directly and presents it via FUSE. This is separate from the SageLang VFS but compatible with the binary image format.
+The FUSE bridge uses **native FFI** (via `/dev/fuse` direct I/O) to register with the Linux kernel's FUSE subsystem. SageFS implements the FUSE ABI 7.26 binary protocol in SageLang (`src/fuse.sage`), communicating with the kernel through libc's `open()`/`read()`/`write()` calls via SageVM FFI. This eliminates the Python bridge dependency for production use.
+
+### Bridge Modes
+
+| Mode | Implementation | Status |
+|------|---------------|--------|
+| **Native FFI** | `/dev/fuse` direct I/O via libc FFI | ✅ Primary |
+| **Python Bridge** | `build/sagefs-fuse` (Python FUSE) | ⚠️ Fallback |
 
 ### Mount Options
 
@@ -63,9 +71,9 @@ The `build/sagefs-fuse` script is a Python FUSE driver that mounts a SageFS bina
 # Format a 256MB image
 ./build/mkfs.sagefs --size 256 --force /tmp/sage.img
 
-# Create mountpoint and mount
+# Create mountpoint and mount using native FFI bridge
 mkdir -p /mnt/sagefs
-./build/sagefs-fuse /tmp/sage.img /mnt/sagefs
+sage --runtime bytecode -I src mount.sage /tmp/sage.img /mnt/sagefs
 
 # Access the filesystem
 ls /mnt/sagefs
