@@ -89,15 +89,12 @@ Kernel                        Kernel
 
 ## Architecture Overview
 
-### Current Userspace Implementation
-- **FUSE Bridge:** Python (`build/sagefs-fuse`) with Python bindings to `libfuse`
-- **VFS Layer:** SageVM with POSIX operations
+### Current Native FFI Implementation
+- **FUSE Bridge:** Native `/dev/fuse` direct I/O via SageVM FFI (ABI 7.26)
+- **VFS Layer:** SageVM with POSIX operations via FFI
 - **Binary Format:** Native image format (block-aligned, little-endian)
-
-### Planned Kernel Integration (Post-FFI)
-- **Kernel Driver (`sagefs.ko`):** FUSE registration + block I/O
-- **SageVM Native:** Direct FUSE calls via FFI
-- **Persistent State:** Kernel-managed VFS state
+- **Kernel Driver:** sagefs.ko skeleton with `/dev/sagefs` char device (Phase 9)
+- **Kernel↔Userspace:** ioctl interface for mount/read/write/flush/sync operations
 
 ## Reading Order
 
