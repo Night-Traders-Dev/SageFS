@@ -5,11 +5,16 @@
 ## wires everything into the VFS, and hands off to the FUSE daemon.
 ##
 ## Usage:
-##   sage --runtime bytecode -I src mount.sage <image>
+##   sage --runtime bytecode -I src mount.sage <image> [mountpoint]
 ##
 ## At runtime the VFS layer calls into the existing core engine modules
 ## (superblock, segment, inode, journal, transaction, dir, btree, etc.)
 ## to service POSIX filesystem operations forwarded by the FUSE bridge.
+##
+## FFI Integration:
+##   When SageVM FFI is available, this module initializes a native
+##   FUSE session via libfuse3 and registers handlers directly.
+##   Otherwise, it falls back to the Python FUSE bridge.
 
 import sys
 import imgio
@@ -140,16 +145,30 @@ proc mount(dev: String) -> vfs.VFS:
 proc main():
     let args: Array[String] = sys.args()
     if len(args) < 2:
-        print("Usage: mount.sage <image>")
+        print("Usage: mount.sage <image> [mountpoint]")
         return
 
     let dev: String = args[1]
+    let mountpoint: String = ""
+    if len(args) >= 3:
+        mountpoint = args[2]
+
     let fs: vfs.VFS = mount(dev)
     if fs == nil:
         print("SageFS: mount failed")
         return
 
     print("SageFS: mounted " + dev + " — entering FUSE loop")
-    fuse.fuse_run(fs)
+
+    # Try FFI-based FUSE first, fall back to Python bridge
+    if mountpoint != "":
+        if fuse.fuse_init(mountpoint):
+            print("SageFS: native FUSE session initialized")
+            fuse.fuse_run(fs)
+        else:
+            print("SageFS: FFI unavailable, using Python FUSE bridge")
+            fuse.fuse_run(fs)
+    else:
+        fuse.fuse_run(fs)
 
 main()

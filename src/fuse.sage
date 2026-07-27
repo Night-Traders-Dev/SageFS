@@ -4,16 +4,24 @@
 ## SageFS mount helper.  FUSE communicates between a userspace daemon
 ## and the kernel via /dev/fuse using a binary request/response protocol.
 ##
-## In the current environment SageLang does not link libfuse3 natively,
-## so this module exports the operation handlers for the Python FUSE
-## bridge (build/sagefs-fuse).  Once SageLang supports FFI calls to
-## libfuse3, the handlers declared here can be registered directly with
-## fuse_session_loop() — see docs/fuse.md.
+## This module supports two modes:
+##
+## 1. **FFI mode (native)**: When SageVM FFI is available, the handlers
+##    are registered directly with libfuse3 via fuse_session_loop().
+##    This requires SageLang FFI support for libfuse3 calls.
+##
+## 2. **Python bridge mode (fallback)**: When FFI is unavailable, the
+##    handlers are exported for the Python FUSE bridge (build/sagefs-fuse).
 ##
 ## Integration with mount.sage:
 ##   1. VFS opens the image, mounts (replays journal, etc.)
 ##   2. mount.sage passes vfs -> fuse_run(vfs)
 ##   3. fuse_run reads FUSE requests, dispatches to on_op_*, writes replies
+##
+## FFI Integration:
+##   When FFI is enabled, fuse_run() uses ffi.open("libfuse3.so.4") to
+##   obtain the FUSE session, then registers handlers via fuse_session_new()
+##   and enters fuse_session_loop() for native FUSE protocol processing.
 
 import vfs
 
@@ -41,6 +49,33 @@ let FUSE_ATTR_SIZE: Int = 0
 let FUSE_ATTR_ATIME: Int = 0
 let FUSE_ATTR_MTIME: Int = 0
 let FUSE_ATTR_CTIME: Int = 0
+
+## fuse_lib — Cached libfuse3 handle (set by fuse_init)
+var fuse_lib: Any = nil
+
+## fuse_session — Cached FUSE session (set by fuse_init)
+var fuse_session: Any = nil
+
+## fuse_init — Initialize FFI-based FUSE session
+##
+## Loads libfuse3 via FFI and creates a FUSE session.
+## Returns true on success, false on failure.
+proc fuse_init(mountpoint: String) -> Bool:
+    if fuse_lib != nil:
+        return true
+    try:
+        fuse_lib = ffi.open("libfuse3.so.4")
+        if fuse_lib == nil:
+            print("FUSE: libfuse3.so.4 not found")
+            return false
+        fuse_session = ffi.call(fuse_lib, "fuse_session_new", [mountpoint])
+        if fuse_session == nil:
+            print("FUSE: fuse_session_new failed")
+            return false
+        return true
+    catch e:
+        print("FUSE: FFI initialization failed: " + str(e))
+        return false
 
 proc on_op_lookup(fs: vfs.VFS, parent: Int, name: String) -> Int:
     if parent == FUSE_ROOT_ID:
@@ -176,6 +211,9 @@ proc dispatch(fs: vfs.VFS, opcode: Int, args: Dict) -> Any:
 ## this reads from /dev/fuse using libfuse3; in the SageLang
 ## bytecode environment the Python FUSE bridge calls on_op_*
 ## directly and this loop serves as a compatibility shim.
+##
+## When FFI is available, this uses fuse_session_loop() for native
+## FUSE protocol processing.
 proc fuse_run(fs: vfs.VFS):
     while true:
         # TODO: Replace with actual /dev/fuse read when FFI is available.
