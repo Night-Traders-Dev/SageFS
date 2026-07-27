@@ -48,7 +48,7 @@ proc main():
 
     let img: String = make_test_image()
 
-    let fs = VFS(img)
+    let fs = VFS(img, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
     let mounted: Bool = fs.mount()
     check("mount valid image", mounted, true)
 

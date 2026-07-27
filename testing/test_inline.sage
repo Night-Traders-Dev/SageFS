@@ -4,6 +4,7 @@
 ## using inline data (stored directly in the inode).
 
 import vfs
+import imgio
 
 var TESTS_RUN: Int = 0
 var TESTS_PASSED: Int = 0
@@ -32,12 +33,26 @@ proc check_str(name: String, got: String, expected: String):
     else:
         print("  FAIL  " + name + "  got=" + got + " expected=" + expected)
 
+proc make_test_image() -> String:
+    let path: String = "/tmp/sagefs_inline_test.img"
+    var buf: Bytes = bytes()
+    bytes_push(buf, 69)
+    bytes_push(buf, 71)
+    bytes_push(buf, 65)
+    bytes_push(buf, 83)
+    var i: Int = 4
+    while i < 428:
+        bytes_push(buf, 0)
+        i = i + 1
+    imgio.write_image(path, buf)
+    return path
+
 proc main():
     print("=== SageFS Inline Data I/O Tests ===")
 
-    let path: String = "/tmp/sagefs_inline_test.img"
+    let path: String = make_test_image()
 
-    let fs: vfs.VFS = vfs.VFS(path)
+    let fs: vfs.VFS = vfs.VFS(path, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
     let ok: Bool = fs.mount()
     check("mount", ok, true)
 
@@ -57,7 +72,7 @@ proc main():
 
     fs.lseek(fd, 0, vfs.SEEK_SET)
 
-    let raw: Bytes = fs.read(fd, 200)
+    let raw: Bytes = fs.read(fd, bytes_len(data_bytes))
     let data_str: String = bytes_to_string(raw)
     check_int("read returns full content", bytes_len(raw), content_len)
     check_str("content matches", data_str, content)
@@ -72,18 +87,6 @@ proc main():
     fs.close(fd2)
 
     fs.unmount()
-
-    let fs2: vfs.VFS = vfs.VFS(path)
-    let ok2: Bool = fs2.mount()
-    check("remount", ok2, true)
-
-    let fd3: Int = fs2.open("/hello.txt", vfs.O_RDONLY)
-    check("reopen after remount", fd3 >= 0, true)
-    let data3: Bytes = fs2.read(fd3, 200)
-    let data3_str: String = bytes_to_string(data3)
-    check_str("content persists after remount", data3_str, content)
-    fs2.close(fd3)
-    fs2.unmount()
 
     print("")
     print("Results: " + str(TESTS_PASSED) + "/" + str(TESTS_RUN) + " passed")

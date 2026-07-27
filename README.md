@@ -246,7 +246,7 @@ Unlike BTRFS's uniform compression policy, SageFS selects compression algorithms
 
 See [plan.md](plan.md) for the full development plan.
 
-**Current progress:** Phases 1–6 complete. 140+ unit tests across 13 test files all passing.
+**Current progress:** Phases 1–6 complete. 140+ unit tests across 16 test files all passing.
 
 - **Phases 1–3 (Core engine):** superblock (dual mirror, checkpoint packs), segment/SIT (log-structured, multi-head), NAT, allocator, inode (inline data), CoW B+ tree, directory (hashed dentries), extent map, checksum engine (CRC32C/xxHash/SHA-256), write-ahead journal, transaction manager (nested transactions), crash-recovery replay, offline fsck.
 - **Phase 4 (Advanced features):** snapshots/subvolumes, transparent compression (lz4/zstd/zlib), inline dedup (bloom filter), encryption (AES-256-XTS), integrated RAID (0/1/5/6/10), extended attributes.

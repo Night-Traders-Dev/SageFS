@@ -11,7 +11,7 @@ proc main(args: Array):
     if ino < 0:
         print "Invalid inode number"
         return
-    let fs = vfs_module.VFS(image_path)
+    let fs = vfs_module.VFS(image_path, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
     if not fs.mount():
         print "Failed to mount image '" + image_path + "'"
         return

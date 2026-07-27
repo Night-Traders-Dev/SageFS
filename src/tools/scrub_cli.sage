@@ -7,7 +7,7 @@ proc main(args: Array):
         print "Usage: scrub_cli.sage <image>"
         return
     let image_path = args[1]
-    let fs = vfs_module.VFS(image_path)
+    let fs = vfs_module.VFS(image_path, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
     if not fs.mount():
         print "Failed to mount image '" + image_path + "'"
         return
