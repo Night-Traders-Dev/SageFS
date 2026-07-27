@@ -64,37 +64,37 @@ The result is a filesystem that delivers **superior SSD performance** with **ent
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    VFS Interface Layer                    │
-│  (POSIX: open, read, write, mkdir, stat, ioctl, xattr)  │
-├─────────────────────────────────────────────────────────┤
-│                   SageFS Core Engine                     │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────────┐ │
-│  │ Namespace│ │ Allocator│ │ Journal  │ │ Transaction│ │
-│  │ Manager  │ │ Engine   │ │ (Log)    │ │ Manager    │ │
-│  └──────────┘ └──────────┘ └──────────┘ └────────────┘ │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────────┐ │
-│  │ Snapshot │ │ Compress │ │ Checksum │ │ Dedup      │ │
-│  │ Engine   │ │ Engine   │ │ Engine   │ │ Engine     │ │
-│  └──────────┘ └──────────┘ └──────────┘ └────────────┘ │
-├─────────────────────────────────────────────────────────┤
-│               On-Disk Layout Engine                      │
-│  ┌────────────┐ ┌─────────┐ ┌──────────┐ ┌───────────┐ │
-│  │ Superblock │ │ Segment │ │ NAT/SIT  │ │ CoW B+    │ │
-│  │ Manager    │ │ Manager │ │ Tables   │ │ Tree      │ │
-│  └────────────┘ └─────────┘ └──────────┘ └───────────┘ │
-├─────────────────────────────────────────────────────────┤
-│                Block I/O Layer                           │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────────┐ │
-│  │ Multi-   │ │ Zone-    │ │ RAID     │ │ Async I/O  │ │
-│  │ Stream   │ │ Aware    │ │ Engine   │ │ Engine     │ │
-│  └──────────┘ └──────────┘ └──────────┘ └────────────┘ │
-├─────────────────────────────────────────────────────────┤
-│                   Device Drivers                         │
-│         (NVMe, SATA, eMMC, UFS, ZNS SSDs)               │
-└─────────────────────────────────────────────────────────┘
-```
+![SageFS Architecture](assets/architecture.png)
+
+SageFS integrates Python-like readable and C-like performant SageLang to deliver:
+
+- **Log-structured flash optimization** (F2FS):
+  - Multi-head logging, hot/warm/cold data classification
+  - Node Address Table (NAT) for wandering-tree elimination
+
+- **Copy-on-write metadata** (BTRFS):
+  - CoW B+ trees, instant snapshots, snapshot diffing
+  - Integration of metadata tree with data management
+
+- **Enterprise data integrity**:
+  - CRC32C/xxHash/SHA-256 per-block checksumming
+  - Dual superblock mirroring & checkpoint packs
+  - Write-ahead journaling + crash recovery
+
+- **Storage efficiency**:
+  - Inline data & directories (≤3.4 KiB)
+  - Transparent compression (lz4/zstd/zlib)
+  - Inline deduplication with bloom filters
+  - RAID 0/1/5/6/10 support
+
+- **Performance**:
+  - Sequential write ≥2 GB/s, random read ≥650K IOPS
+  - Mount time <0.5s, write amplification <1.2x
+  - Lock-free hot paths, async I/O (io_uring)
+
+- **Development**: All modules documented, 16 test files (343 tests), CLI tools
+
+The binary image format uses little-endian encoding with 4 KiB blocks, 512 blocks per segment, and integrated data management layer.
 
 ---
 
