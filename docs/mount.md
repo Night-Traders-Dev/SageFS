@@ -31,6 +31,7 @@ mount.sage
 ├─ 3. Check filesystem state flag
 │      └─ if dirty → replay journal
 ├─ 4. Initialise VFS (src/vfs.sage)
+│      └─ ⚠️ **Requires FFI**: VFS in-memory state rebuilt each mount
 ├─ 5. Print filesystem info
 ├─ 6. Hand off to FUSE bridge
 │      └─ build/sagefs-fuse <image> <mountpoint>
