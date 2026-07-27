@@ -246,16 +246,15 @@ Unlike BTRFS's uniform compression policy, SageFS selects compression algorithms
 
 See [plan.md](plan.md) for the full development plan.
 
-**Current progress:** Phases 1–6 complete. 16 test files (343 tests) all passing. SageFS is **production-ready for kernel driver integration** - only FFI integration remains as the final hurdle.
+**Current progress:** Phases 1–6 complete. 16 test files (343 tests) all passing. SageFS **FFI integration complete** (Phase 1) — SageVM can now call libfuse3 via FFI, enabling native kernel driver integration.
 
-- **Phases 1–3 (Core engine):** superblock (dual mirror, checkpoint packs), segment/SIT (log-structured, multi-head), NAT, allocator, inode (inline data), CoW B+ tree, directory (hashed dentries), extent map, checksum engine (CRC32C/xxHash/SHA-256), write-ahead journal, transaction manager (nested transactions), crash-recovery replay, offline fsck.
-- **Phase 4 (Advanced features):** snapshots/subvolumes, transparent compression (lz4/zstd/zlib), inline dedup (bloom filter), encryption (AES-256-XTS), integrated RAID (0/1/5/6/10), extended attributes.
-- **Phase 5 (Performance):** garbage collector (greedy + cost-benefit), async I/O (io_uring), caching layer (NAT/extent/node caches), multi-stream allocation, lock-free hot paths, read-ahead & write coalescing.
-- **Phase 6 (Tooling):** mkfs.sagefs, VFS interface (POSIX operations), FUSE protocol handlers, CLI tool suite, kernel-driver bridge requirements.
-
-*⚠️ FFI integration required for production FUSE implementation*
+### Phase 7+: Kernel Driver Integration
+- **Phase 7:** SageVM FFI backend (sage_ffi_call with type marshaling for C functions) — ✅ Done
+- **Phase 8:** SageFS FUSE FFI integration (fuse_init, libfuse3 session, Python bridge fallback) — ✅ Done
+- **Phase 9:** Linux kernel driver (sagefs.ko) with native FUSE and block I/O — ⏳ Next
 - **SageVM v1.0.0:** Updated to latest SageVM (GA) and SageLang — full test conformance, JIT engine, dual-architecture (SVM stack + SRVM RISC-V) support, security sandboxing.
 - **VFS write persistence:** Fixed `write()` to persist data to in-memory inode entries, enabling create/write/read cycles.
+- **FFI Integration (Phase 1):** SageVM now supports native FFI calling (sage_ffi_call with type marshaling). SageFS FUSE module has FFI session initialization with libfuse3 and Python bridge fallback. mount.sage supports mountpoint argument.
 
 ---
 
