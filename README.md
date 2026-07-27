@@ -140,9 +140,9 @@ dd if=/dev/zero of=sagefs.img bs=1M count=1024
 ### Mount & Access (FUSE)
 
 ```bash
-# Mount via FUSE bridge (Python)
+# Mount via native FFI (preferred)
 mkdir -p /mnt/sagefs
-./build/sagefs-fuse sagefs.img /mnt/sagefs
+sage --runtime bytecode -I src mount.sage sagefs.img /mnt/sagefs
 
 # Access files
 ls /mnt/sagefs/
@@ -150,6 +150,9 @@ cat /mnt/sagefs/README.txt
 
 # Unmount
 fusermount3 -u /mnt/sagefs
+
+# Fallback: Python FUSE bridge (if native FFI unavailable)
+./build/sagefs-fuse sagefs.img /mnt/sagefs
 ```
 
 ### Run Tests
@@ -200,8 +203,8 @@ SageFS/
 ├── testing/                       # Test suite
 ├── benchmark/                     # Performance benchmarks
 ├── build/                         # Build configuration & artifacts
-│   ├── sagefs-fuse                # Python FUSE bridge (fusepy)
-│   └── mkfs.sagefs                # Formatter shell script
+│   ├── sagefs_full.sgvm          # Full SageFS bytecode bundle
+│   └── mkfs.sagefs               # Formatter shell script
 ```
 
 ---
@@ -326,10 +329,10 @@ SageFS now provides a unified command-line interface for all filesystem operatio
 - Supports `let fs: vfs.VFS = vfs.VFS(dev)` syntax
 - Module-type declarations for better code organization
 
-✅ **Simplified deployment**
-- Single executable replaces separate `mkfs.sagefs` and `sagefs-fuse`
+✓ **FFI-native deployment** (Phase 1)
+- Native `/dev/fuse` direct I/O via SageVM FFI eliminates Python bridge dependency
 - Consistent interface across all SageFS operations
-- Better integration with existing workflows
+- Kernel driver (`sagefs.ko`) bridge via `/dev/sagefs` char device (Phase 9 skeleton)
 
 ---
 
