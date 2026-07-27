@@ -4,12 +4,28 @@ The SageFS kernel driver is a Linux kernel module that bridges the kernel VFS la
 
 ## Architecture
 
-The kernel driver uses a character device (`/dev/sagefs`) to communicate between the kernel and userspace:
+The kernel driver bridges the Linux kernel VFS layer with SageFS's userspace storage engine via two interfaces:
 
-1. **Kernel Module** (`sagefs.ko`): Registers `/dev/sagefs` as a character device
-2. **ioctl Interface**: Mount, read, write, flush, sync operations
-3. **Userspace Daemon**: SageFS process that manages the actual storage engine
-4. **FFI Bridge** (future): Direct calls from kernel to SageVM runtime
+1. **Character Device** (`/dev/sagefs`): Direct char device I/O for read/write operations
+2. **Sysfs Interface** (`/sys/kernel/sagefs/`): Command/state interface for daemon communication
+```
+┌───────────────────────────────────────────────────┐
+│ Kernel (sagefs.ko)                              │
+│  /dev/sagefs  ← char dev ──→  I/O buffer        │
+│  /sys/kernel/sagefs/  ← sysfs ──→  command/state │
+└────────────────────┬────────────────────────────┘
+                     │ sysfs command
+                     ▼
+┌───────────────────────────────────────────────────┐
+│ Userspace Daemon (sagefs_daemon.sh)             │
+│  Reads /sys/kernel/sagefs/command               │
+│  Routes to SageVM bytecode via SageFS runtime   │
+│  Updates /sys/kernel/sagefs/state               │
+└────────────────────┬────────────────────────────┘
+                     │ VFS
+                     ▼
+              SageFS image file
+```
 
 ## Building
 
@@ -29,30 +45,67 @@ sudo insmod sagefs.ko
 | `SAGEFS_IOC_FLUSH` | None | Flush pending writes |
 | `SAGEFS_IOC_SYNC` | None | Sync filesystem metadata |
 
-## Interface
+sysfs: $(cat /sys/kernel/sagefs/state)
 
-### Userspace API
+## Sysfs Command Protocol
 
-The kernel driver is designed to work with SageFS's userspace FUSE daemon:
+### /sys/kernel/sagefs/state (read-only)
+Returns the current driver state:
+| Value | State | Description |
+|-------|-------|-------------|
+| 0 | STOPPED | Driver idle, no mount |
+| 1 | RUNNING | Driver active, no mount |
+| 2 | MOUNTED | Filesystem mounted at mount point |
+| 3 | DIRTY | Pending writes need sync |
+| 4 | ERROR | Error state, fsck recommended |
 
-```c
-// Mount a SageFS image
-struct sagefs_mount_req req = {0};
-strncpy(req.image_path, "/path/to/image.sagefs", sizeof(req.image_path));
-strncpy(req.mount_point, "/mount/point", sizeof(req.mount_point));
-req.flags = 0;
-ioctl(fd, SAGEFS_IOC_MOUNT, &req);
+### /sys/kernel/sagefs/image_path (read-only)
+Current SageFS image path being managed.
 
-// Read data
-struct sagefs_io_req io = {0};
-io.offset = 0;
-io.size = 4096;
-io.opcode = SAGEFS_OP_READ;
-ioctl(fd, SAGEFS_IOC_READ, &io);
+### /sys/kernel/sagefs/mount_point (read-only)
+Current mount point (empty if not mounted).
+
+### /sys/kernel/sagefs/command (write-only)
+Send a command to the driver. The kernel logs the command and updates state. Supported commands:
+
+| Command | Description | State Change |
+|---------|-------------|-------------|
+| `mount /path/to/image.sagefs` | Set image path for mount | → DIRTY |
+| `read offset=0 size=4096` | Queue a read operation | no change |
+| `write offset=0 size=4096` | Queue a write operation | → DIRTY |
+| `flush` | Flush pending writes | DIRTY |
+| `sync` | Sync metadata to disk | → MOUNTED |
+
+## Building
+
+```bash
+cd src/kernel
+make
+sudo insmod sagefs.ko
 ```
 
-### Future: Direct FFI Integration
+## Verifying Load
 
-The long-term goal is to use SageVM's FFI capabilities directly from kernel space,
-eliminating the userspace daemon overhead entirely. This would make SageFS a fully
-native kernel filesystem.
+```bash
+# Check kernel log
+dmesg | tail -5
+
+# Check sysfs state
+cat /sys/kernel/sagefs/state
+
+# Check device major/minor
+cat /sys/class/sagefs/sagefs/dev
+
+# Send a mount command via sysfs
+echo "mount /tmp/test.img" > /sys/kernel/sagefs/command
+
+# Check state
+cat /sys/kernel/sagefs/state
+
+# Unload
+sudo rmmod sagefs
+```
+
+## Userspace Daemon
+
+`sagefs_daemon.sh` provides a bridge between the sysfs command interface and SageFS's userspace runtime. It reads commands from sysfs and routes them to the SageVM bytecode interpreter.
