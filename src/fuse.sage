@@ -391,6 +391,15 @@ proc build_statfs_response(unique: Int, st: Dict) -> Bytes:
     encode_u64_le_to(resp, 72, st["ffree"])
     return resp
 
+## build_attr_response — Build a FUSE getattr response (attr_out + entry_out, 88 bytes)
+proc build_attr_response(unique: Int, st: Dict) -> Bytes:
+    var resp: Bytes = bytes(88)
+    encode_u32_le_to(resp, 0, 88)
+    encode_i32_le_to(resp, 4, 0)
+    encode_u64_le_to(resp, 8, unique)
+    encode_u64_le_to(resp, 24, 0)
+    return resp
+
 ## fuse_run — Main FUSE event loop
 ##
 ## Loops reading FUSE request frames from /dev/fuse via FFI,
@@ -516,16 +525,6 @@ proc fuse_run(fs: vfs.VFS):
             case FUSE_LOOKUP:
                 if result != nil and result >= 0:
                     resp = build_lookup_response(unique, result)
-                else:
-                    resp = build_error_response(unique, -2)
-    ## build_attr_response — Build a FUSE getattr response (attr_out + entry_out, 88 bytes)
-proc build_attr_response(unique: Int, st: Dict) -> Bytes:
-    var resp: Bytes = bytes(88)
-    encode_u32_le_to(resp, 0, 88)
-    encode_i32_le_to(resp, 4, 0)
-    encode_u64_le_to(resp, 8, unique)
-    encode_u64_le_to(resp, 24, 0)
-    return resp
                 else:
                     resp = build_error_response(unique, -2)
             case FUSE_OPEN:
