@@ -250,11 +250,11 @@ See [plan.md](plan.md) for the full development plan.
 
 ### Phase 7+: Kernel Driver Integration
 - **Phase 7:** SageVM FFI backend (sage_ffi_call with type marshaling for C functions) — ✅ Done
-- **Phase 8:** SageFS FUSE FFI integration (fuse_init, libfuse3 session, Python bridge fallback) — ✅ Done
+- **Phase 8:** SageFS FUSE FFI integration (fuse_init, fuse_run with /dev/fuse direct I/O, libfuse3 session support) — ✅ Done
 - **Phase 9:** Linux kernel driver (sagefs.ko) with native FUSE and block I/O — ⏳ Next
 - **SageVM v1.0.0:** Updated to latest SageVM (GA) and SageLang — full test conformance, JIT engine, dual-architecture (SVM stack + SRVM RISC-V) support, security sandboxing.
 - **VFS write persistence:** Fixed `write()` to persist data to in-memory inode entries, enabling create/write/read cycles.
-- **FFI Integration (Phase 1):** SageVM now supports native FFI calling (sage_ffi_call with type marshaling). SageFS FUSE module has FFI session initialization with libfuse3 and Python bridge fallback. mount.sage supports mountpoint argument.
+- **FFI Integration (Phase 1):** SageVM now supports native FFI calling (sage_ffi_call with type marshaling). SageFS FUSE module has FFI session initialization with libfuse3 and Python bridge fallback. fuse_run implements native /dev/fuse event loop via libc FFI (ABI 7.26). mount.sage supports mountpoint argument.
 
 ---
 
