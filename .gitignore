@@ -2,4 +2,5 @@ __pycache__
 *.sgvm
 *.svm
 *.c
+!src/kernel/
 bytecode

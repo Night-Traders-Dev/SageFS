@@ -30,6 +30,8 @@ This directory contains per-component design and API documentation for SageFS. E
 | [mount.md](mount.md) | `src/mount.sage` | 6 | ✅ Implemented |
 | [fuse.md](fuse.md) | `src/fuse.sage` | 6 | ✅ Implemented |
 | [imgio.md](imgio.md) | `src/imgio.sage` | 6 | ✅ Implemented |
+| [kernel_driver.md](kernel_driver.md) | `src/kernel/sagefs.c` | 9 | 🔄 In Progress |
+| [kernel_driver.md](kernel_driver.md) | `src/kernel/sagefs.c` | 9 | 🔄 In Progress |
 
 ## Reading Order
 
@@ -59,6 +61,7 @@ For newcomers, we recommend reading the documentation in dependency order:
 22. **[imgio.md](imgio.md)** — binary image persistence
 23. **[mount.md](mount.md)** — mount helper and FUSE bridge
 24. **[fuse.md](fuse.md)** — FUSE protocol interface
+25. **[kernel_driver.md](kernel_driver.md)** — kernel driver architecture & ioctl interface
 
 ## Conventions
 
@@ -67,75 +70,22 @@ For newcomers, we recommend reading the documentation in dependency order:
 - **Segment size:** 512 blocks = 2 MiB (default).
 - **Integers:** SageLang `Int` is a tagged 64-bit value; fixed-width arithmetic is enforced by masking (`& 0xFFFFFFFF`, `& 0xFFFFFFFFFFFFFFFF`).
 
-## FFI Bridge Required
+## FFI Bridge Implementation Status
 
-The SageFS FUSE protocol currently relies on a **Python bridge** (`build/sagefs-fuse`) because SageVM lacks FFI support for `Bytes` objects and libfuse3 integration. To achieve production-ready performance and true kernel integration, SageFS requires FFI integration:
+SageFS now uses **native FFI** via `/dev/fuse` direct I/O, eliminating the Python bridge dependency. The kernel driver (`sagefs.ko`) provides a character device `/dev/sagefs` for kernel↔userspace communication.
 
-### Current Architecture (Userspace)
-
-```
-Userspace                      Kernel
-────────                      ─────
-  Python FUSE Bridge          → FUSE Ops
-      (build/sagefs-fuse)               → VFS
-          └─ /dev/fuse                       └─ Linux VFS
-              └─ SageFS VFS layer
-                  └─ SageVM bytecode
-```
-
-### Target Architecture (Post-FFI)
+### Current Architecture (Post-FFI)
 
 ```
 Kernel                        Kernel
 ────────                      ─────
-  sagefs.ko                    → FUSE Ops
-      └─ libfuse3              → SageVM Native
-          └─ SageVM FFI        → VFS + Core Engine
-              └─ Native code (SageLang → C)
-                  └─ Performance-critical paths
+  sagefs.ko                   → /dev/sagefs (char dev)
+      └─ ioctl                   └─ SageFS Daemon
+          └─ SageFS VFS layer
+              └─ /dev/fuse (native FFI loop)
+                  └─ SageVM bytecode
+                      └─ Storage Engine
 ```
-
-### Required FFI Capabilities
-
-1. **Bytes Object FFI**
-   - SageLang FFI support for SageVM `Bytes` type
-   - Direct zero-copy marshalling of binary buffers
-
-2. **libfuse3 FFI**
-   - SageLang FFI binding for `libfuse3` functions
-   - Enable `fuse_session_loop()` calls from SageLang
-
-### Implementation Roadmap
-
-| Component | Current Status | FFI Required | Timeline |
-|-----------|----------------|-------------|----------|
-| SageVM FFI backend | ❌ Missing | `Bytes` objects, syscalls | Phase 1 |
-| libfuse3 FFI | ❌ Missing | FUSE protocol binding | Phase 1 |
-| Python bridge | ✅ Implemented | - | Obsolete (post-FFI) |
-| Kernel driver | ❌ Not started | FUSE registration | Phase 2 |
-
-### Impact on Design
-
-1. **Move FUSE Logic Native**
-   ```sage
-   // Current (Python bridge):
-   on_op_lookup(fs: VFS, parent, name)
-   on_op_read(fs: VFS, ino, offset, size)
-   
-   // Future (FFI enabled):
-   on_op_lookup(vfs_ptr, parent, name)
-   on_op_read(vfs_ptr, ino, offset, size)
-   ```
-
-2. **Direct Block I/O**
-   - Kernel driver exposes `read_block()`/`write_block()` to SageVM
-   - Bypass `imgio` layer for kernel<->SageVM communication
-   - Enable true persistent state across remounts
-
-3. **Native Performance**
-   - Lock-free per-CPU data structures
-   - Reduced marshalling overhead
-   - Memory pooling and cache optimization
 
 ## Architecture Overview
 
@@ -177,5 +127,6 @@ For newcomers, we recommend reading the documentation in dependency order:
 22. **[imgio.md](imgio.md)** — binary image persistence
 23. **[mount.md](mount.md)** — mount helper and FUSE integration
 24. **[fuse.md](fuse.md)** — FUSE protocol interface
+25. **[kernel_driver.md](kernel_driver.md)** — kernel driver architecture & ioctl interface
 
 See the top-level [plan.md](../plan.md) for the full development roadmap and [README.md](../README.md) for the project overview.
