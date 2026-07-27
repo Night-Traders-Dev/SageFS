@@ -21,17 +21,17 @@ let FUSE_ROOT_ID: Int = 1
 
 let FUSE_LOOKUP: Int = 1
 let FUSE_GETATTR: Int = 3
+let FUSE_OPEN: Int = 14
 let FUSE_READ: Int = 15
 let FUSE_WRITE: Int = 16
+let FUSE_STATFS: Int = 17
+let FUSE_RELEASE: Int = 18
 let FUSE_MKDIR: Int = 27
 let FUSE_READDIR: Int = 28
 let FUSE_RMDIR: Int = 29
 let FUSE_UNLINK: Int = 30
-let FUSE_RENAME: Int = 38
 let FUSE_CREATE: Int = 35
-let FUSE_OPEN: Int = 14
-let FUSE_RELEASE: Int = 18
-let FUSE_STATFS: Int = 17
+let FUSE_RENAME: Int = 38
 let FUSE_DESTROY: Int = 39
 
 let FUSE_ATTR_MODE: Int = 0
@@ -128,3 +128,57 @@ proc on_op_open(fs: vfs.VFS, ino: Int, flags: Int) -> Int:
     if ino == FUSE_ROOT_ID:
         path = "/"
     return fs.open(path, flags)
+
+## dispatch — Central FUSE opcode dispatcher
+##
+## Routes a FUSE opcode to the corresponding handler function,
+## extracting arguments from the args Dict.  Returns the handler's
+## result (nil for void handlers).
+proc dispatch(fs: vfs.VFS, opcode: Int, args: Dict) -> Any:
+    match opcode:
+        case FUSE_LOOKUP:
+            return on_op_lookup(fs, args["parent"], args["name"])
+        case FUSE_GETATTR:
+            return on_op_getattr(fs, args["ino"])
+        case FUSE_OPEN:
+            return on_op_open(fs, args["ino"], args["flags"])
+        case FUSE_READ:
+            return on_op_read(fs, args["ino"], args["offset"], args["size"])
+        case FUSE_WRITE:
+            return on_op_write(fs, args["ino"], args["offset"], args["data"])
+        case FUSE_STATFS:
+            return on_op_statfs(fs)
+        case FUSE_RELEASE:
+            on_op_release(fs, args["ino"])
+            return nil
+        case FUSE_MKDIR:
+            return on_op_mkdir(fs, args["parent"], args["name"], args["mode"])
+        case FUSE_READDIR:
+            return on_op_readdir(fs, args["ino"])
+        case FUSE_RMDIR:
+            return on_op_rmdir(fs, args["parent"], args["name"])
+        case FUSE_UNLINK:
+            return on_op_unlink(fs, args["parent"], args["name"])
+        case FUSE_CREATE:
+            return on_op_create(fs, args["parent"], args["name"], args["mode"])
+        case FUSE_RENAME:
+            return on_op_rename(fs, args["parent"], args["name"], args["newparent"], args["newname"])
+        case FUSE_DESTROY:
+            on_op_destroy(fs)
+            return nil
+        default:
+            return nil
+
+## fuse_run — Main FUSE event loop
+##
+## Loops reading FUSE request frames, dispatching each to the
+## appropriate handler, and writing the reply.  In a native build
+## this reads from /dev/fuse using libfuse3; in the SageLang
+## bytecode environment the Python FUSE bridge calls on_op_*
+## directly and this loop serves as a compatibility shim.
+proc fuse_run(fs: vfs.VFS):
+    while true:
+        # TODO: Replace with actual /dev/fuse read when FFI is available.
+        # The SageFS Python bridge (build/sagefs-fuse) currently drives
+        # the FUSE loop by calling on_op_* directly.
+        break

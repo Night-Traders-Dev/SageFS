@@ -1,12 +1,9 @@
 ## test_inline.sage — Inline data I/O tests
 ##
-## Tests that the VFS reads inline data from the on-disk inode directory
-## rather than returning empty bytes.  Builds an image with a real inode
-## entry containing inline data, mounts it, and verifies the data round-trips.
+## Tests that the VFS correctly stores and retrieves small files
+## using inline data (stored directly in the inode).
 
-import imgio
 import vfs
-let VFS = vfs.VFS
 
 var TESTS_RUN: Int = 0
 var TESTS_PASSED: Int = 0
@@ -39,40 +36,33 @@ proc main():
     print("=== SageFS Inline Data I/O Tests ===")
 
     let path: String = "/tmp/sagefs_inline_test.img"
-    var buf: Bytes = bytes()
 
-    bytes_push(buf, 69)
-    bytes_push(buf, 71)
-    bytes_push(buf, 65)
-    bytes_push(buf, 83)
-    var i: Int = 4
-    while i < 428:
-        bytes_push(buf, 0)
-        i = i + 1
+    let fs: vfs.VFS = vfs.VFS(path)
+    let ok: Bool = fs.mount()
+    check("mount", ok, true)
 
-    let greeting: String = "Hello from inline data!"
     let content: String = "This is test content stored directly in the inode."
+    let content_len: Int = len(content)
 
-    let S_IFREG: Int = 0x8000
-    imgio.write_inode_entry(buf, 2, S_IFREG | 0x1A4, len(content), "hello.txt", content)
-
-    imgio.write_image(path, buf)
-
-    let fs = VFS(path)
-    let mounted: Bool = fs.mount()
-    check("mount", mounted, true)
-
-    let fd: Int = fs.open("/hello.txt", vfs.O_RDONLY)
+    let fd: Int = fs.open("/hello.txt", vfs.O_CREAT | vfs.O_RDWR)
     check("open hello.txt", fd >= 0, true)
 
-    let raw: Bytes = fs.read(fd, 200)
-    let data_str: String = bytes_to_string(raw)
-    check_int("read returns full content", bytes_len(raw), len(content))
-    check_str("content matches", data_str, content)
+    let data_bytes: Bytes = bytes(content)
+    let written: Int = fs.write(fd, data_bytes)
+    check_int("write returns length", written, content_len)
 
     let st: Dict = fs.stat("/hello.txt")
     check("stat exists", st["exists"], true)
-    check_int("stat size matches", st["size"], len(content))
+    check_int("stat size matches", st["size"], content_len)
+
+    fs.lseek(fd, 0, vfs.SEEK_SET)
+
+    let raw: Bytes = fs.read(fd, 200)
+    let data_str: String = bytes_to_string(raw)
+    check_int("read returns full content", bytes_len(raw), content_len)
+    check_str("content matches", data_str, content)
+
+    fs.close(fd)
 
     let fd2: Int = fs.open("/hello.txt", vfs.O_RDONLY)
     check("second open succeeds", fd2 >= 0, true)
@@ -81,8 +71,19 @@ proc main():
     check_str("read prefix", prefix, "This ")
     fs.close(fd2)
 
-    fs.close(fd)
     fs.unmount()
+
+    let fs2: vfs.VFS = vfs.VFS(path)
+    let ok2: Bool = fs2.mount()
+    check("remount", ok2, true)
+
+    let fd3: Int = fs2.open("/hello.txt", vfs.O_RDONLY)
+    check("reopen after remount", fd3 >= 0, true)
+    let data3: Bytes = fs2.read(fd3, 200)
+    let data3_str: String = bytes_to_string(data3)
+    check_str("content persists after remount", data3_str, content)
+    fs2.close(fd3)
+    fs2.unmount()
 
     print("")
     print("Results: " + str(TESTS_PASSED) + "/" + str(TESTS_RUN) + " passed")
