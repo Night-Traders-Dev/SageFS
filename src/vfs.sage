@@ -256,29 +256,6 @@ class VFS:
 
         self.nat.prefill_free_nids(128)
 
-        let root_inode = self.inode.get_inode(ROOT_INO)
-        if root_inode != nil and root_inode.is_inline() and len(root_inode.get_inline_data()) > 0:
-            let inline_data = root_inode.get_inline_data()
-            let data_bytes = bytes(inline_data)
-            if bytes_len(data_bytes) >= 2:
-                let entry_count = bytes_get(data_bytes, 0) | (bytes_get(data_bytes, 1) << 8)
-                var off = 2
-                var i = 0
-                while i < entry_count and off + 8 <= bytes_len(data_bytes):
-                    let entry_ino = bytes_get(data_bytes, off) | (bytes_get(data_bytes, off + 1) << 8) | (bytes_get(data_bytes, off + 2) << 16) | (bytes_get(data_bytes, off + 3) << 24)
-                    let name_len = bytes_get(data_bytes, off + 4) | (bytes_get(data_bytes, off + 5) << 8)
-                    let ftype = bytes_get(data_bytes, off + 6)
-                    off = off + 8
-                    if off + name_len <= bytes_len(data_bytes):
-                        var name_str = ""
-                        var j = 0
-                        while j < name_len:
-                            name_str = name_str + chr(bytes_get(data_bytes, off + j))
-                            j = j + 1
-                        self.dir.add_entry(name_str, entry_ino, ftype)
-                        off = off + name_len
-                    i = i + 1
-
         if bytes_len(raw) > 428:
             var tail_bytes = bytes()
             var ti: Int = 428
@@ -287,23 +264,148 @@ class VFS:
                 ti = ti + 1
             if bytes_len(tail_bytes) > 0:
                 let legacy_entries = imgio.read_inode_entries(tail_bytes)
-                for le in legacy_entries:
+
+                var i = 0
+                while i < len(legacy_entries):
+                    let le = legacy_entries[i]
                     let l_name: String = le["name"]
                     let l_ino: Int = le["ino"]
-                    if len(l_name) > 0 and self.dir.lookup(l_name) == -1:
-                        self.dir.add_entry(l_name, l_ino, dir_module.DT_REG)
+                    let l_mode: Int = le["mode"]
+                    let l_size: Int = le["size"]
+                    let l_data: String = le["data"]
+                    if len(l_name) == 0:
+                        let target = self.inode.get_inode(l_ino)
+                        if target == nil:
+                            self._ensure_stub_inode(l_ino, l_mode, l_data, l_size)
+                        else:
+                            target.set_inline_data(l_data)
+                            target.size = l_size
+                    i = i + 1
+
+                i = 0
+                while i < len(legacy_entries):
+                    let le = legacy_entries[i]
+                    let l_name: String = le["name"]
+                    let l_ino: Int = le["ino"]
+                    let l_mode: Int = le["mode"]
+                    let l_data: String = le["data"]
+                    let l_size: Int = le["size"]
+                    if len(l_name) > 0:
+                        if self.dir.lookup(l_name) == -1:
+                            self.dir.add_entry(l_name, l_ino, dir_module.DT_REG)
+                        if self.inode.get_inode(l_ino) == nil:
+                            self._ensure_stub_inode(l_ino, l_mode, l_data, l_size)
+                    i = i + 1
+
+        let root_inode = self.inode.get_inode(ROOT_INO)
+        if root_inode != nil and len(root_inode.get_inline_data()) > 0:
+            let loaded_dir = self._decode_dir_data(root_inode.get_inline_data())
+            let dir_entries = loaded_dir.read_dir()
+            for de in dir_entries:
+                if self.dir.lookup(de.name) == -1:
+                    let ftype: Int = dir_module.DT_DIR
+                    if de.file_type == dir_module.DT_REG or de.file_type == dir_module.DT_DIR:
+                        ftype = de.file_type
+                    self.dir.add_entry(de.name, de.ino, ftype)
 
         self.mounted = true
         return true
 
+    proc _ensure_stub_inode(self, ino: Int, mode: Int, inline_data: String, size: Int):
+        if self.inode.get_inode(ino) != nil:
+            return
+        let nid: Int = self.inode.nat_table.allocate_nid()
+        let stub = inode_module.SageFSInode(ino, nid, mode)
+        stub.uid = 0
+        stub.gid = 0
+        let S_IFDIR_VAL: Int = 0x4000
+        let S_IFMT_VAL: Int = 0xF000
+        if (mode & S_IFMT_VAL) == S_IFDIR_VAL:
+            stub.nlink = 2
+            stub.set_flag(inode_module.INODE_FLAG_INLINE_DENTRY)
+        if len(inline_data) > 0:
+            stub.set_inline_data(inline_data)
+            stub.size = size
+        self.inode.inodes[str(ino)] = stub
+        self.inode.dirty_inodes[str(ino)] = true
+
+    proc _persist_all(self):
+        let all_inos = self.inode.list_inodes()
+        for ino in all_inos:
+            let inode_obj = self.inode.get_inode(ino)
+            if inode_obj == nil:
+                continue
+            let data_str: String = inode_obj.get_inline_data()
+            if len(data_str) > 0 or inode_obj.size > 0:
+                imgio.write_inode_entry(self.image_buf, ino, inode_obj.mode, inode_obj.size, "", data_str)
+
     proc unmount(self) -> Bool:
         if not self.mounted:
             return false
+        self._persist_all()
         self.mounted = false
         self.fds = []
         self.next_fd = 0
         imgio.write_image(self.image_path, self.image_buf)
         return true
+
+    proc _bytes_to_hex(self, buf: Bytes) -> String:
+        var hex: String = ""
+        var i: Int = 0
+        let hex_chars: String = "0123456789abcdef"
+        while i < bytes_len(buf):
+            let b: Int = bytes_get(buf, i)
+            hex = hex + hex_chars[(b >> 4) & 0xF]
+            hex = hex + hex_chars[b & 0xF]
+            i = i + 1
+        return hex
+
+    proc _hex_to_bytes(self, hex: String) -> Bytes:
+        let result: Bytes = bytes()
+        var i: Int = 0
+        let hlen: Int = len(hex)
+        while i + 1 < hlen:
+            var hi: Int = 0
+            var lo: Int = 0
+            let c1: Int = ord(hex[i])
+            if c1 >= 48 and c1 <= 57:
+                hi = c1 - 48
+            elif c1 >= 97 and c1 <= 102:
+                hi = c1 - 97 + 10
+            let c2: Int = ord(hex[i + 1])
+            if c2 >= 48 and c2 <= 57:
+                lo = c2 - 48
+            elif c2 >= 97 and c2 <= 102:
+                lo = c2 - 97 + 10
+            bytes_push(result, (hi << 4) | lo)
+            i = i + 2
+        return result
+
+    proc _decode_dir_data(self, inline_data: String) -> Any:
+        let dir_mgr = dir_module.DirManager()
+        if len(inline_data) < 2:
+            return dir_mgr
+        let data_bytes: Bytes = self._hex_to_bytes(inline_data)
+        if bytes_len(data_bytes) < 8:
+            return dir_mgr
+        let count: Int = bytes_get(data_bytes, 0) | (bytes_get(data_bytes, 1) << 8)
+        var off: Int = 2
+        var i: Int = 0
+        while i < count and off + 8 <= bytes_len(data_bytes):
+            let entry_ino: Int = bytes_get(data_bytes, off) | (bytes_get(data_bytes, off + 1) << 8) | (bytes_get(data_bytes, off + 2) << 16) | (bytes_get(data_bytes, off + 3) << 24)
+            let name_len: Int = bytes_get(data_bytes, off + 4) | (bytes_get(data_bytes, off + 5) << 8)
+            let ftype: Int = bytes_get(data_bytes, off + 6)
+            off = off + 7
+            if off + name_len <= bytes_len(data_bytes):
+                var name_str: String = ""
+                var j: Int = 0
+                while j < name_len:
+                    name_str = name_str + chr(bytes_get(data_bytes, off + j))
+                    j = j + 1
+                dir_mgr.add_entry(name_str, entry_ino, ftype)
+                off = off + name_len
+            i = i + 1
+        return dir_mgr
 
     proc _get_dir(self, ino: Int) -> Any:
         if ino == ROOT_INO:
@@ -313,29 +415,8 @@ class VFS:
             return nil
         if not inode_obj.is_dir():
             return nil
-        let dir_mgr = dir_module.DirManager()
         let inline_data = inode_obj.get_inline_data()
-        if len(inline_data) > 0:
-            let data_bytes = bytes(inline_data)
-            if bytes_len(data_bytes) >= 8:
-                let count = bytes_get(data_bytes, 0) | (bytes_get(data_bytes, 1) << 8)
-                var off = 2
-                var i = 0
-                while i < count and off + 8 <= bytes_len(data_bytes):
-                    let entry_ino = bytes_get(data_bytes, off) | (bytes_get(data_bytes, off + 1) << 8) | (bytes_get(data_bytes, off + 2) << 16) | (bytes_get(data_bytes, off + 3) << 24)
-                    let name_len = bytes_get(data_bytes, off + 4) | (bytes_get(data_bytes, off + 5) << 8)
-                    let ftype = bytes_get(data_bytes, off + 6)
-                    off = off + 8
-                    if off + name_len <= bytes_len(data_bytes):
-                        var name_str = ""
-                        var j = 0
-                        while j < name_len:
-                            name_str = name_str + chr(bytes_get(data_bytes, off + j))
-                            j = j + 1
-                        dir_mgr.add_entry(name_str, entry_ino, ftype)
-                        off = off + name_len
-                    i = i + 1
-        return dir_mgr
+        return self._decode_dir_data(inline_data)
 
     proc _save_dir(self, ino: Int, dir_mgr: Any):
         let inode_obj = self.inode.get_inode(ino)
@@ -360,9 +441,10 @@ class VFS:
             while j < name_len:
                 bytes_push(data_bytes, bytes_get(name_bytes, j))
                 j = j + 1
-        inode_obj.set_inline_data(bytes_to_string(data_bytes))
+        let hex_data: String = self._bytes_to_hex(data_bytes)
+        inode_obj.set_inline_data(hex_data)
         self.inode.update_inode(ino)
-        imgio.write_inode_entry(self.image_buf, ino, inode_obj.mode, inode_obj.size, "", inode_obj.get_inline_data())
+        imgio.write_inode_entry(self.image_buf, ino, inode_obj.mode, inode_obj.size, "", hex_data)
 
     proc split_path(self, path: String) -> Array[String]:
         var result: Array[String] = []
