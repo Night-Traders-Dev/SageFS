@@ -381,7 +381,7 @@ static int __init sagefs_init(void)
         return -ENOMEM;
     }
 
-    ret = sysfs_create_group(sagefs_kobj, sagefs_groups);
+    ret = sysfs_create_groups(sagefs_kobj, sagefs_groups);
     if (ret < 0) {
         printk(KERN_ERR "sagefs: failed to create sysfs group\n");
         kobject_put(sagefs_kobj);
@@ -399,7 +399,7 @@ static int __init sagefs_init(void)
 
 static void __exit sagefs_exit(void)
 {
-    sysfs_remove_group(sagefs_kobj, sagefs_groups);
+    sysfs_remove_groups(sagefs_kobj, sagefs_groups);
     kobject_put(sagefs_kobj);
     device_destroy(sagefs_class, sagefs_dev);
     class_destroy(sagefs_class);

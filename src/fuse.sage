@@ -28,12 +28,15 @@ import vfs
 let FUSE_ROOT_ID: Int = 1
 
 let FUSE_LOOKUP: Int = 1
+let FUSE_FORGET: Int = 2
 let FUSE_GETATTR: Int = 3
 let FUSE_OPEN: Int = 14
 let FUSE_READ: Int = 15
 let FUSE_WRITE: Int = 16
 let FUSE_STATFS: Int = 17
 let FUSE_RELEASE: Int = 18
+let FUSE_INTERRUPT: Int = 23
+let FUSE_INIT: Int = 26
 let FUSE_MKDIR: Int = 27
 let FUSE_READDIR: Int = 28
 let FUSE_RMDIR: Int = 29
@@ -138,24 +141,38 @@ proc encode_i32_le_to(buf: Bytes, off: Int, val: Int):
 
 ## on_op_lookup — FUSE LOOKUP handler
 proc on_op_lookup(fs: vfs.VFS, parent: Int, name: String) -> Int:
+    if name == "/" or name == "" or name == ".":
+        fs.cache_ino_path(1, "/")
+        return 1
     if parent == FUSE_ROOT_ID:
         let path: String = "/" + name
-        return fs.resolve_path(path)
-    return -1
+        let ino: Int = fs.resolve_path(path)
+        if ino >= 0:
+            fs.cache_ino_path(ino, path)
+        return ino
+    let parent_path: String = fs.resolve_ino(parent)
+    if len(parent_path) == 0:
+        return -1
+    let path: String = parent_path + "/" + name
+    let ino: Int = fs.resolve_path(path)
+    if ino >= 0:
+        fs.cache_ino_path(ino, path)
+    return ino
 
 ## on_op_getattr — FUSE GETATTR handler
 proc on_op_getattr(fs: vfs.VFS, ino: Int) -> Dict:
-    if ino == FUSE_ROOT_ID:
-        return fs.stat("/")
-    return fs.stat("")
+    let path: String = fs.resolve_ino(ino)
+    if len(path) == 0:
+        if ino == FUSE_ROOT_ID:
+            path = "/"
+        else:
+            return {"exists": false}
+    return fs.stat(path)
 
 ## on_op_read — FUSE READ handler
 proc on_op_read(fs: vfs.VFS, ino: Int, offset: Int, size: Int) -> Bytes:
-    let path: String = ""
-    if ino == FUSE_ROOT_ID:
-        path = "/"
-    let info: Dict = fs.stat(path)
-    if not info["exists"]:
+    let path: String = fs.resolve_ino(ino)
+    if len(path) == 0:
         return bytes()
     let fd: Int = fs.open(path, vfs.O_RDONLY)
     if fd == -1:
@@ -167,9 +184,9 @@ proc on_op_read(fs: vfs.VFS, ino: Int, offset: Int, size: Int) -> Bytes:
 
 ## on_op_write — FUSE WRITE handler
 proc on_op_write(fs: vfs.VFS, ino: Int, offset: Int, data: Bytes) -> Int:
-    let path: String = ""
-    if ino == FUSE_ROOT_ID:
-        path = "/"
+    let path: String = fs.resolve_ino(ino)
+    if len(path) == 0:
+        return -1
     let fd: Int = fs.open(path, vfs.O_WRONLY)
     if fd == -1:
         return -1
@@ -180,36 +197,86 @@ proc on_op_write(fs: vfs.VFS, ino: Int, offset: Int, data: Bytes) -> Int:
 
 ## on_op_mkdir — FUSE MKDIR handler
 proc on_op_mkdir(fs: vfs.VFS, parent: Int, name: String, mode: Int) -> Bool:
-    let path: String = "/" + name
+    let path: String = ""
+    if parent == FUSE_ROOT_ID:
+        path = "/" + name
+    else:
+        let pp: String = fs.resolve_ino(parent)
+        if len(pp) == 0:
+            return false
+        path = pp + "/" + name
     return fs.mkdir(path, mode)
 
 ## on_op_readdir — FUSE READDIR handler
 proc on_op_readdir(fs: vfs.VFS, ino: Int) -> Array[String]:
-    if ino == FUSE_ROOT_ID:
-        return fs.readdir("/")
-    var empty: Array[String] = []
-    return empty
+    let path: String = fs.resolve_ino(ino)
+    if len(path) == 0:
+        if ino == FUSE_ROOT_ID:
+            path = "/"
+        else:
+            return []
+    return fs.readdir(path)
 
 ## on_op_unlink — FUSE UNLINK handler
 proc on_op_unlink(fs: vfs.VFS, parent: Int, name: String) -> Bool:
-    let path: String = "/" + name
+    let path: String = ""
+    if parent == FUSE_ROOT_ID:
+        path = "/" + name
+    else:
+        let pp: String = fs.resolve_ino(parent)
+        if len(pp) == 0:
+            return false
+        path = pp + "/" + name
     return fs.unlink(path)
 
 ## on_op_rmdir — FUSE RMDIR handler
 proc on_op_rmdir(fs: vfs.VFS, parent: Int, name: String) -> Bool:
-    let path: String = "/" + name
+    let path: String = ""
+    if parent == FUSE_ROOT_ID:
+        path = "/" + name
+    else:
+        let pp: String = fs.resolve_ino(parent)
+        if len(pp) == 0:
+            return false
+        path = pp + "/" + name
     return fs.rmdir(path)
 
 ## on_op_rename — FUSE RENAME handler
 proc on_op_rename(fs: vfs.VFS, parent: Int, name: String, newparent: Int, newname: String) -> Bool:
-    let oldpath: String = "/" + name
-    let newpath: String = "/" + newname
+    let oldpath: String = ""
+    if parent == FUSE_ROOT_ID:
+        oldpath = "/" + name
+    else:
+        let pp: String = fs.resolve_ino(parent)
+        if len(pp) == 0:
+            return false
+        oldpath = pp + "/" + name
+    let newpath: String = ""
+    if newparent == FUSE_ROOT_ID:
+        newpath = "/" + newname
+    else:
+        let np: String = fs.resolve_ino(newparent)
+        if len(np) == 0:
+            return false
+        newpath = np + "/" + newname
     return fs.rename(oldpath, newpath)
 
 ## on_op_create — FUSE CREATE handler
 proc on_op_create(fs: vfs.VFS, parent: Int, name: String, mode: Int) -> Int:
-    let path: String = "/" + name
-    return fs.open(path, vfs.O_CREAT | vfs.O_RDWR)
+    let path: String = ""
+    if parent == FUSE_ROOT_ID:
+        path = "/" + name
+    else:
+        let pp: String = fs.resolve_ino(parent)
+        if len(pp) == 0:
+            return -1
+        path = pp + "/" + name
+    let fd: Int = fs.open(path, vfs.O_CREAT | vfs.O_RDWR)
+    if fd >= 0:
+        let ino: Int = fs.resolve_path(path)
+        if ino >= 0:
+            fs.cache_ino_path(ino, path)
+    return fd
 
 ## on_op_statfs — FUSE STATFS handler
 proc on_op_statfs(fs: vfs.VFS) -> Dict:
@@ -232,9 +299,12 @@ proc on_op_release(fs: vfs.VFS, ino: Int):
 
 ## on_op_open — FUSE OPEN handler
 proc on_op_open(fs: vfs.VFS, ino: Int, flags: Int) -> Int:
-    let path: String = ""
-    if ino == FUSE_ROOT_ID:
-        path = "/"
+    let path: String = fs.resolve_ino(ino)
+    if len(path) == 0:
+        if ino == FUSE_ROOT_ID:
+            path = "/"
+        else:
+            return -1
     return fs.open(path, flags)
 
 ## dispatch — Central FUSE opcode dispatcher
@@ -244,6 +314,8 @@ proc on_op_open(fs: vfs.VFS, ino: Int, flags: Int) -> Int:
 ## result (nil for void handlers).
 proc dispatch(fs: vfs.VFS, opcode: Int, args: Dict) -> Any:
     match opcode:
+        case FUSE_INIT:
+            return {"max_readahead": 131072, "flags": 0, "max_write": 65536}
         case FUSE_LOOKUP:
             return on_op_lookup(fs, args["parent"], args["name"])
         case FUSE_GETATTR:
@@ -315,89 +387,152 @@ proc build_error_response(unique: Int, errno: Int) -> Bytes:
     encode_u64_le_to(resp, 8, unique)
     return resp
 
-## build_lookup_response — Build a FUSE lookup response (entry_out, 72 bytes)
+## build_init_response — Build a FUSE INIT response (fuse_init_out, 104 bytes)
+proc build_init_response(unique: Int, max_readahead: Int, flags: Int, max_write: Int) -> Bytes:
+    var resp: Bytes = bytes(104)
+    encode_u32_le_to(resp, 0, 104)
+    encode_i32_le_to(resp, 4, 0)
+    encode_u64_le_to(resp, 8, unique)
+    encode_u32_le_to(resp, 24, 7)
+    encode_u32_le_to(resp, 28, 26)
+    encode_u64_le_to(resp, 32, max_readahead)
+    encode_u32_le_to(resp, 40, flags)
+    encode_u32_le_to(resp, 48, 16)
+    encode_u32_le_to(resp, 52, 16)
+    encode_u32_le_to(resp, 56, max_write)
+    encode_u32_le_to(resp, 60, 1)
+    return resp
+
+## build_lookup_response — Build a FUSE lookup response (fuse_entry_out, 112 bytes)
 proc build_lookup_response(unique: Int, ino: Int) -> Bytes:
-    var resp: Bytes = bytes(72)
-    encode_u32_le_to(resp, 0, 72)
+    var resp: Bytes = bytes(112)
+    encode_u32_le_to(resp, 0, 112)
     encode_i32_le_to(resp, 4, 0)
     encode_u64_le_to(resp, 8, unique)
     encode_u64_le_to(resp, 24, ino)
+    encode_u64_le_to(resp, 32, 0)
+    encode_u64_le_to(resp, 40, 3600)
+    encode_u64_le_to(resp, 48, 3600)
+    encode_u64_le_to(resp, 56, 0)
+    encode_u64_le_to(resp, 64, 0)
     return resp
 
-## build_open_response — Build a FUSE open response (open_out, 24 bytes)
+## build_open_response — Build a FUSE open response (fuse_open_out, 32 bytes)
 proc build_open_response(unique: Int, fh: Int) -> Bytes:
+    var resp: Bytes = bytes(32)
+    encode_u32_le_to(resp, 0, 32)
+    encode_i32_le_to(resp, 4, 0)
+    encode_u64_le_to(resp, 8, unique)
+    encode_u64_le_to(resp, 24, fh)
+    encode_u32_le_to(resp, 28, 0)
+    return resp
+
+## build_write_response — Build a FUSE write response (fuse_write_out, 24 bytes)
+proc build_write_response(unique: Int, size: Int) -> Bytes:
     var resp: Bytes = bytes(24)
     encode_u32_le_to(resp, 0, 24)
     encode_i32_le_to(resp, 4, 0)
     encode_u64_le_to(resp, 8, unique)
-    encode_u64_le_to(resp, 24, fh)
+    encode_u32_le_to(resp, 24, size)
     return resp
 
-## build_read_response — Build a FUSE read response (header + data)
+## build_read_response — Build a FUSE read response with data payload
 proc build_read_response(unique: Int, data: Bytes) -> Bytes:
     let data_len: Int = bytes_len(data)
     var resp: Bytes = bytes(16 + data_len)
     encode_u32_le_to(resp, 0, 16 + data_len)
     encode_i32_le_to(resp, 4, 0)
     encode_u64_le_to(resp, 8, unique)
-    var j: Int = 0
-    while j < data_len:
-        resp[16 + j] = data[j]
-        j = j + 1
+    var i: Int = 0
+    while i < data_len:
+        resp[16 + i] = data[i]
+        i = i + 1
     return resp
 
-## build_write_response — Build a FUSE write response (write_out, 24 bytes)
-proc build_write_response(unique: Int, size: Int) -> Bytes:
-    var resp: Bytes = bytes(24)
-    encode_u32_le_to(resp, 0, 24)
-    encode_i32_le_to(resp, 4, 0)
-    encode_u64_le_to(resp, 8, unique)
-    encode_u64_le_to(resp, 24, size)
-    return resp
-
-## build_bool_response — Build a FUSE bool response (16 bytes, ok or error)
-proc build_bool_response(unique: Int, success: Bool, unused: Int) -> Bytes:
-    if success:
+## build_bool_response — Build a FUSE response for boolean-result operations (mkdir, rmdir, unlink, rename)
+proc build_bool_response(unique: Int, ok: Bool, errno_default: Int) -> Bytes:
+    if ok:
         return build_ok_response(unique)
-    return build_error_response(unique, -1)
+    return build_error_response(unique, -errno_default)
 
-## build_readdir_response — Build a FUSE readdir response with dentries
-proc build_readdir_response(unique: Int, entries: Array[String]) -> Bytes:
-    let count: Int = len(entries)
-    var resp: Bytes = bytes(16 + 12 * count)
-    encode_u32_le_to(resp, 0, 16 + 12 * count)
-    encode_i32_le_to(resp, 4, 0)
-    encode_u64_le_to(resp, 8, unique)
-    var j: Int = 0
-    while j < count:
-        encode_u64_le_to(resp, 16 + j * 12, 0)
-        encode_u64_le_to(resp, 24 + j * 12, 0)
-        encode_u32_le_to(resp, 32 + j * 12, len(entries[j]))
-        j = j + 1
-    return resp
-
-## build_statfs_response — Build a FUSE statfs response (120 bytes)
+## build_statfs_response — Build a FUSE statfs response (fuse_statfs_out, 112 bytes)
 proc build_statfs_response(unique: Int, st: Dict) -> Bytes:
-    var resp: Bytes = bytes(120)
-    encode_u32_le_to(resp, 0, 120)
+    var resp: Bytes = bytes(112)
+    encode_u32_le_to(resp, 0, 112)
     encode_i32_le_to(resp, 4, 0)
     encode_u64_le_to(resp, 8, unique)
-    encode_u64_le_to(resp, 24, st["bsize"])
-    encode_u64_le_to(resp, 32, st["frsize"])
-    encode_u64_le_to(resp, 40, st["blocks"])
-    encode_u64_le_to(resp, 48, st["bfree"])
-    encode_u64_le_to(resp, 56, st["bavail"])
-    encode_u64_le_to(resp, 64, st["files"])
-    encode_u64_le_to(resp, 72, st["ffree"])
+    if st != nil:
+        var blocks: Int = 0
+        var bfree: Int = 0
+        var bavail: Int = 0
+        var files: Int = 0
+        var ffree: Int = 0
+        if dict_has(st, "blocks"): blocks = st["blocks"]
+        if dict_has(st, "bfree"): bfree = st["bfree"]
+        if dict_has(st, "bavail"): bavail = st["bavail"]
+        if dict_has(st, "files"): files = st["files"]
+        if dict_has(st, "ffree"): ffree = st["ffree"]
+        encode_u64_le_to(resp, 24, blocks)
+        encode_u64_le_to(resp, 32, bfree)
+        encode_u64_le_to(resp, 40, bavail)
+        encode_u64_le_to(resp, 48, files)
+        encode_u64_le_to(resp, 56, ffree)
+        encode_u32_le_to(resp, 64, 4096)
+        encode_u32_le_to(resp, 68, 512)
+        encode_u32_le_to(resp, 72, 255)
     return resp
 
-## build_attr_response — Build a FUSE getattr response (attr_out + entry_out, 88 bytes)
+## build_readdir_response — Build a FUSE readdir response with dirent entries
+proc build_readdir_response(unique: Int, entries: Array[String]) -> Bytes:
+    var payload: Bytes = bytes(0)
+    var pos: Int = 1
+    var i: Int = 0
+    while i < len(entries):
+        let name: String = entries[i]
+        let name_bytes: Int = len(name)
+        let ent_size: Int = 24 + name_bytes
+        var ent: Bytes = bytes(ent_size)
+        encode_u64_le_to(ent, 0, 1)
+        encode_u64_le_to(ent, 8, ent_size)
+        encode_u32_le_to(ent, 16, name_bytes)
+        encode_u32_le_to(ent, 20, 4)
+        var j = 0
+        while j < name_bytes:
+            ent[24 + j] = ord(name[j])
+            j = j + 1
+        var k = 0
+        while k < bytes_len(ent):
+            bytes_push(payload, ent[k])
+            k = k + 1
+        i = i + 1
+    var resp: Bytes = bytes(16 + bytes_len(payload))
+    encode_u32_le_to(resp, 0, 16 + bytes_len(payload))
+    encode_i32_le_to(resp, 4, 0)
+    encode_u64_le_to(resp, 8, unique)
+    i = 0
+    while i < bytes_len(payload):
+        resp[16 + i] = payload[i]
+        i = i + 1
+    return resp
+
+## build_attr_response — Build a FUSE getattr response (fuse_attr_out, 88 bytes)
 proc build_attr_response(unique: Int, st: Dict) -> Bytes:
     var resp: Bytes = bytes(88)
     encode_u32_le_to(resp, 0, 88)
     encode_i32_le_to(resp, 4, 0)
     encode_u64_le_to(resp, 8, unique)
-    encode_u64_le_to(resp, 24, 0)
+    encode_u64_le_to(resp, 24, 3600)
+    encode_u64_le_to(resp, 32, 3600)
+    encode_u64_le_to(resp, 40, 0)
+    encode_u64_le_to(resp, 48, 0)
+    if dict_has(st, "size"):
+        encode_u64_le_to(resp, 56, st["size"])
+    if dict_has(st, "ino"):
+        encode_u64_le_to(resp, 64, st["ino"])
+    if dict_has(st, "mode"):
+        encode_u32_le_to(resp, 72, st["mode"])
+    if dict_has(st, "nlink"):
+        encode_u32_le_to(resp, 76, st["nlink"])
     return resp
 
 ## fuse_run — Main FUSE event loop
@@ -464,6 +599,15 @@ proc fuse_run(fs: vfs.VFS):
             case FUSE_LOOKUP:
                 let name_end: Int = find_in_bytes(body, 0)
                 args["name"] = body_to_string(slice(body, 0, name_end))
+            case FUSE_INIT:
+                args["major"] = decode_u32_le(body, 0)
+                args["minor"] = decode_u32_le(body, 4)
+                args["max_readahead"] = decode_u64_le(body, 8)
+                args["flags"] = decode_u32_le(body, 16)
+            case FUSE_FORGET:
+                args["ino"] = nodeid
+                let nlookup: Int = decode_u64_le(body, 0)
+                continue
             case FUSE_GETATTR:
                 args["ino"] = nodeid
             case FUSE_OPEN:
@@ -522,6 +666,11 @@ proc fuse_run(fs: vfs.VFS):
 
         var resp: Bytes = bytes(0)
         match opcode:
+            case FUSE_INIT:
+                if result != nil:
+                    resp = build_init_response(unique, result["max_readahead"], result["flags"], result["max_write"])
+                else:
+                    resp = build_error_response(unique, -5)
             case FUSE_LOOKUP:
                 if result != nil and result >= 0:
                     resp = build_lookup_response(unique, result)

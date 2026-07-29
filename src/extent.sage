@@ -165,13 +165,6 @@ class ExtentTree:
         for k in keys:
             self.btree.delete(k)
 
-    ## Replace all extents for the given inode.
-    proc _write_extents(self, ino: Int, extents):
-        self._delete_extents(ino)
-        for ext in extents:
-            let key = self._key(ino, ext.file_offset)
-            self.btree.insert(key, ext.serialize())
-
     ## Insert an extent, merging with physically and logically
     ## adjacent extents where possible.
     proc insert_extent(self, ino: Int, file_offset: Int, block_addr: Int, length: Int):
@@ -180,56 +173,59 @@ class ExtentTree:
         if length > MAX_EXTENT_LEN:
             length = MAX_EXTENT_LEN
 
-        var all = self._collect_extents(ino)
-        var extents = []
-        for e in all:
-            if e.file_offset != file_offset:
-                push(extents, e)
+        # Delete any existing extent at the exact file_offset
+        let existing_key = self._key(ino, file_offset)
+        self.btree.delete(existing_key)
 
-        # Find insertion position (sorted by file_offset)
-        var pos = len(extents)
-        for i in range(len(extents)):
-            if extents[i].file_offset > file_offset:
-                pos = i
-                break
+        # Find and try left merge
+        var merge_left = false
+        let left_ge = self._search_ge(self._key(ino, file_offset))
+        if left_ge != nil:
+            let leaf = left_ge.leaf
+            let idx = left_ge.idx
+            # Check item just before the found position
+            if idx > 0:
+                let prev_item = leaf.items[idx - 1]
+                if prev_item.key.object_id == ino and prev_item.key.type == EXTENT_ITEM:
+                    let left_ext = extent_from_bytes(self._read_data(leaf, prev_item))
+                    if left_ext.end_offset() == file_offset and left_ext.block_addr + left_ext.length == block_addr:
+                        if left_ext.length + length <= MAX_EXTENT_LEN:
+                            self.btree.delete(self._key(ino, left_ext.file_offset))
+                            file_offset = left_ext.file_offset
+                            block_addr = left_ext.block_addr
+                            length = left_ext.length + length
+                            merge_left = true
+            # Check item at found position for right merge
+            if not merge_left and idx < leaf.num_items:
+                let item = leaf.items[idx]
+                if item.key.object_id == ino and item.key.type == EXTENT_ITEM:
+                    let right_ext = extent_from_bytes(self._read_data(leaf, item))
+                    if right_ext.file_offset > file_offset:
+                        if file_offset + length == right_ext.file_offset and block_addr + length == right_ext.block_addr:
+                            if length + right_ext.length <= MAX_EXTENT_LEN:
+                                self.btree.delete(self._key(ino, right_ext.file_offset))
+                                length = length + right_ext.length
 
-        # Insert the new extent into the list
-        var new_ext = Extent(file_offset, block_addr, length)
-        var result = []
-        for i in range(pos):
-            push(result, extents[i])
-        push(result, new_ext)
-        for i in range(pos, len(extents)):
-            push(result, extents[i])
+        # Also try right merge if no left merge was found above
+        if not merge_left:
+            let right_ge = self._search_ge(self._key(ino, file_offset))
+            if right_ge != nil:
+                let leaf = right_ge.leaf
+                let idx = right_ge.idx
+                if idx < leaf.num_items:
+                    let item = leaf.items[idx]
+                    if item.key.object_id == ino and item.key.type == EXTENT_ITEM:
+                        let right_ext = extent_from_bytes(self._read_data(leaf, item))
+                        if right_ext.file_offset > file_offset:
+                            if file_offset + length == right_ext.file_offset and block_addr + length == right_ext.block_addr:
+                                if length + right_ext.length <= MAX_EXTENT_LEN:
+                                    self.btree.delete(self._key(ino, right_ext.file_offset))
+                                    length = length + right_ext.length
 
-        # Left merge
-        if pos > 0:
-            let left = result[pos]
-            let right = result[pos - 1]
-            if right.end_offset() == left.file_offset and right.block_addr + right.length == left.block_addr:
-                if right.length + left.length <= MAX_EXTENT_LEN:
-                    right.length = right.length + left.length
-                    var merged = []
-                    for i in range(len(result)):
-                        if i != pos:
-                            push(merged, result[i])
-                    result = merged
-                    pos = pos - 1
-
-        # Right merge
-        if pos + 1 < len(result):
-            let left = result[pos]
-            let right = result[pos + 1]
-            if left.end_offset() == right.file_offset and left.block_addr + left.length == right.block_addr:
-                if left.length + right.length <= MAX_EXTENT_LEN:
-                    left.length = left.length + right.length
-                    var merged = []
-                    for i in range(len(result)):
-                        if i != pos + 1:
-                            push(merged, result[i])
-                    result = merged
-
-        self._write_extents(ino, result)
+        # Insert the (possibly merged) extent
+        let new_key = self._key(ino, file_offset)
+        let new_ext = Extent(file_offset, block_addr, length)
+        self.btree.insert(new_key, new_ext.serialize())
 
     ## Look up the extent containing the given logical file offset.
     ## Returns the Extent, or nil if no extent maps to the offset.

@@ -4,8 +4,8 @@ import sys
 
 let BTREE_NODE_SIZE: Int = 4096
 let BTREE_MAGIC: Int = 0x42545245
-let BTREE_MAX_KEYS: Int = 168
-let BTREE_MIN_KEYS: Int = 84
+let BTREE_MAX_KEYS: Int = 84
+let BTREE_MIN_KEYS: Int = 42
 
 proc write_le32(buf: Bytes, val: Int):
     bytes_push(buf, val & 0xFF)
@@ -191,6 +191,24 @@ class BTreeNode:
                 push(self.pointers, BTreePointer(key, block_addr, gen))
                 off = off + 32
 
+    ## Rebuild data_area by copying each item's data sequentially,
+    ## updating data_offset values to match the compacted layout.
+    proc compact_data_area(self):
+        if not self.is_leaf:
+            return
+        if self.num_items == 0:
+            self.data_area = bytes()
+            return
+        let new_data = bytes()
+        for i in range(self.num_items):
+            let item = self.items[i]
+            let old_off = item.data_offset
+            let old_sz = item.data_size
+            item.data_offset = bytes_len(new_data)
+            for j in range(old_sz):
+                bytes_push(new_data, bytes_get(self.data_area, old_off + j))
+        self.data_area = new_data
+
     proc search(self, key) -> Int:
         var low: Int = 0
         var high: Int = self.num_items - 1
@@ -284,6 +302,18 @@ class BTreeNode:
             for _ in range(remove_count):
                 pop(self.pointers)
             self.num_items = mid_idx
+
+        # Compact the original (left) node's data_area (leaf nodes only)
+        if self.is_leaf:
+            var left_data = bytes()
+            for i in range(self.num_items):
+                let item = self.items[i]
+                let old_off = item.data_offset
+                let old_sz = item.data_size
+                item.data_offset = bytes_len(left_data)
+                for j in range(old_sz):
+                    bytes_push(left_data, bytes_get(self.data_area, old_off + j))
+            self.data_area = left_data
 
         return SplitResult(new_node, median_key)
 
@@ -383,6 +413,7 @@ class BTreeEngine:
 
         while current.num_items > BTREE_MAX_KEYS:
             let split = current.split()
+            split.node.block_addr = self.allocator.alloc_block()
             self.write_node(current)
             self.write_node(split.node)
 
@@ -455,6 +486,7 @@ class BTreeEngine:
             j = j + 1
         pop(current.items)
         current.num_items = current.num_items - 1
+        current.compact_data_area()
         self.write_node(current)
 
         while current.num_items < BTREE_MIN_KEYS and len(path) > 0:

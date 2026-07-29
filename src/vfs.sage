@@ -81,6 +81,7 @@ class VFS:
         self.next_fd = 0
         self.image_buf = bytes()
         self.blocks_growable = false
+        self.ino_path_cache = {}
 
         self.segment = seg_mgr
         self.allocator = allocator
@@ -309,7 +310,20 @@ class VFS:
                     self.dir.add_entry(de.name, de.ino, ftype)
 
         self.mounted = true
+        self.ino_path_cache = {}
+        self.cache_ino_path(ROOT_INO, "/")
         return true
+
+    ## ino_path_cache — reverse map ino → cached path for FUSE operations
+
+    proc cache_ino_path(self, ino: Int, path: String):
+        self.ino_path_cache[str(ino)] = path
+
+    proc resolve_ino(self, ino: Int) -> String:
+        let key: String = str(ino)
+        if dict_has(self.ino_path_cache, key):
+            return self.ino_path_cache[key]
+        return ""
 
     proc _ensure_stub_inode(self, ino: Int, mode: Int, inline_data: String, size: Int):
         if self.inode.get_inode(ino) != nil:
