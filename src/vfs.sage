@@ -169,7 +169,28 @@ class VFS:
         return info
 
     proc mount(self) -> Bool:
-        let raw: Bytes = imgio.read_image(self.image_path)
+        var raw: Bytes = bytes()
+
+        if imgio._is_block_device(self.image_path):
+            let header = imgio.read_image_exact(self.image_path, superblock.SUPERBLOCK_HEADER_SIZE)
+            if bytes_len(header) < 428:
+                print("VFS: image too small (" + str(bytes_len(header)) + " bytes)")
+                return false
+            self.sb = superblock.deserialize_superblock(header)
+            if self.sb.magic != superblock.SAGEFS_MAGIC:
+                print("VFS: bad magic 0x" + str(self.sb.magic) + " (expected 0x" + str(superblock.SAGEFS_MAGIC) + ")")
+                return false
+            let needed = self.sb.image_size
+            let bs = self._init_block_size()
+            let area_end = self.sb.inode_entry_start_blk * bs + self.sb.inode_entry_byte_size
+            if area_end > needed:
+                needed = area_end
+            if needed < superblock.SUPERBLOCK_HEADER_SIZE:
+                needed = superblock.SUPERBLOCK_HEADER_SIZE
+            raw = imgio.read_image_exact(self.image_path, needed)
+        else:
+            raw = imgio.read_image(self.image_path)
+
         if bytes_len(raw) < 428:
             print("VFS: image too small (" + str(bytes_len(raw)) + " bytes)")
             return false
@@ -257,46 +278,43 @@ class VFS:
 
         self.nat.prefill_free_nids(128)
 
-        if bytes_len(raw) > 428:
-            var tail_bytes = bytes()
-            var ti: Int = 428
-            while ti < bytes_len(raw):
-                bytes_push(tail_bytes, bytes_get(raw, ti))
-                ti = ti + 1
-            if bytes_len(tail_bytes) > 0:
-                let legacy_entries = imgio.read_inode_entries(tail_bytes)
+        ## Parse inode entries from the reserved block area
+        let area_start = self.sb.inode_entry_start_blk * bs
+        let area_size = self.sb.inode_entry_byte_size
+        if area_size > 0:
+            let legacy_entries = imgio.read_inode_entries_from_area(raw, area_start, area_size)
 
-                var i = 0
-                while i < len(legacy_entries):
-                    let le = legacy_entries[i]
-                    let l_name: String = le["name"]
-                    let l_ino: Int = le["ino"]
-                    let l_mode: Int = le["mode"]
-                    let l_size: Int = le["size"]
-                    let l_data: String = le["data"]
-                    if len(l_name) == 0:
-                        let target = self.inode.get_inode(l_ino)
-                        if target == nil:
-                            self._ensure_stub_inode(l_ino, l_mode, l_data, l_size)
-                        else:
-                            target.set_inline_data(l_data)
-                            target.size = l_size
-                    i = i + 1
+            var i = 0
+            while i < len(legacy_entries):
+                let le = legacy_entries[i]
+                let l_name: String = le["name"]
+                let l_ino: Int = le["ino"]
+                let l_mode: Int = le["mode"]
+                let l_size: Int = le["size"]
+                let l_data: String = le["data"]
+                if len(l_name) == 0:
+                    let target = self.inode.get_inode(l_ino)
+                    if target == nil:
+                        self._ensure_stub_inode(l_ino, l_mode, l_data, l_size)
+                    else:
+                        target.set_inline_data(l_data)
+                        target.size = l_size
+                i = i + 1
 
-                i = 0
-                while i < len(legacy_entries):
-                    let le = legacy_entries[i]
-                    let l_name: String = le["name"]
-                    let l_ino: Int = le["ino"]
-                    let l_mode: Int = le["mode"]
-                    let l_data: String = le["data"]
-                    let l_size: Int = le["size"]
-                    if len(l_name) > 0:
-                        if self.dir.lookup(l_name) == -1:
-                            self.dir.add_entry(l_name, l_ino, dir_module.DT_REG)
-                        if self.inode.get_inode(l_ino) == nil:
-                            self._ensure_stub_inode(l_ino, l_mode, l_data, l_size)
-                    i = i + 1
+            i = 0
+            while i < len(legacy_entries):
+                let le = legacy_entries[i]
+                let l_name: String = le["name"]
+                let l_ino: Int = le["ino"]
+                let l_mode: Int = le["mode"]
+                let l_size: Int = le["size"]
+                let l_data: String = le["data"]
+                if len(l_name) > 0:
+                    if self.dir.lookup(l_name) == -1:
+                        self.dir.add_entry(l_name, l_ino, dir_module.DT_REG)
+                    if self.inode.get_inode(l_ino) == nil:
+                        self._ensure_stub_inode(l_ino, l_mode, l_data, l_size)
+                i = i + 1
 
         let root_inode = self.inode.get_inode(ROOT_INO)
         if root_inode != nil and len(root_inode.get_inline_data()) > 0:
@@ -344,6 +362,14 @@ class VFS:
         self.inode.dirty_inodes[str(ino)] = true
 
     proc _persist_all(self):
+        let bs = self._init_block_size()
+        let area_start = self.sb.inode_entry_start_blk * bs
+        let area_size = self.sb.inode_entry_byte_size
+        if area_size <= 0:
+            return
+        let area_end = area_start + area_size
+        self._ensure_image_size(area_end)
+        var off = area_start
         let all_inos = self.inode.list_inodes()
         for ino in all_inos:
             let inode_obj = self.inode.get_inode(ino)
@@ -351,12 +377,24 @@ class VFS:
                 continue
             let data_str: String = inode_obj.get_inline_data()
             if len(data_str) > 0 or inode_obj.size > 0:
-                imgio.write_inode_entry(self.image_buf, ino, inode_obj.mode, inode_obj.size, "", data_str)
+                let entry_size = imgio.write_inode_entry_at(self.image_buf, off, ino, inode_obj.mode, inode_obj.size, "", data_str)
+                off = off + entry_size
+        ## Zero out remaining area
+        while off < area_end:
+            bytes_set(self.image_buf, off, 0)
+            off = off + 1
 
     proc unmount(self) -> Bool:
         if not self.mounted:
             return false
         self._persist_all()
+        self.sb.image_size = bytes_len(self.image_buf)
+        let sb_bytes = self.sb.serialize()
+        let bs = self._init_block_size()
+        var i = 0
+        while i < bytes_len(sb_bytes) and i < bs:
+            bytes_set(self.image_buf, i, bytes_get(sb_bytes, i))
+            i = i + 1
         self.mounted = false
         self.fds = []
         self.next_fd = 0
@@ -458,7 +496,9 @@ class VFS:
         let hex_data: String = self._bytes_to_hex(data_bytes)
         inode_obj.set_inline_data(hex_data)
         self.inode.update_inode(ino)
-        imgio.write_inode_entry(self.image_buf, ino, inode_obj.mode, inode_obj.size, "", hex_data)
+        let bs = self._init_block_size()
+        let area_start = self.sb.inode_entry_start_blk * bs
+        imgio.write_inode_entry_at(self.image_buf, area_start, ino, inode_obj.mode, inode_obj.size, "", hex_data)
 
     proc split_path(self, path: String) -> Array[String]:
         var result: Array[String] = []

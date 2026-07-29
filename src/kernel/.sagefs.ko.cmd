@@ -1,0 +1,1 @@
+savedcmd_sagefs.ko := ld.lld -r -m elf_x86_64 -mllvm -import-instr-limit=5 -z noexecstack --build-id=sha1  -T /usr/src/linux-headers-7.1.5-x64v3-xanmod1/scripts/module.lds -o sagefs.ko sagefs.o sagefs.mod.o .module-common.o

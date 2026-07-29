@@ -62,8 +62,8 @@ proc parse_args(args: Array) -> Dict:
     let prog_args = []
     var k = 0
     while k < len(args):
-        ## Skip --runtime and --gc:* paired flags (flag + value)
-        if args[k] == "--runtime" or args[k] == "--gc:arc" or args[k] == "--gc:orc" or args[k] == "--gc:tracing":
+        ## Skip --runtime and --gc:* and -I paired flags (flag + value)
+        if args[k] == "--runtime" or args[k] == "--gc:arc" or args[k] == "--gc:orc" or args[k] == "--gc:tracing" or args[k] == "-I":
             k = k + 2
             continue
         if not is_launcher_token(args[k]):
@@ -135,7 +135,32 @@ proc format_device(dev: String, opts: Dict) -> Bool:
     readme = readme + "Root Inode:      " + str(sb.root_inode) + "\n"
 
     let S_IFREG: Int = 0x8000
-    imgio.write_inode_entry(buf, 2, S_IFREG | 0x1A4, len(readme), "README.txt", readme)
+    ## Write initial README.txt inode entry to the inode area
+    let bs = sb.block_size
+    let inode_area_offset = sb.inode_entry_start_blk * bs
+    var i = bytes_len(buf)
+    while i < inode_area_offset + 200:
+        bytes_push(buf, 0)
+        i = i + 1
+    imgio.write_inode_entry_at(buf, inode_area_offset, 2, S_IFREG | 0x1A4, len(readme), "README.txt", readme)
+
+    let min_image_size = sb.inode_entry_start_blk * sb.block_size + sb.inode_entry_byte_size
+    if bytes_len(buf) > min_image_size:
+        sb.image_size = bytes_len(buf)
+    else:
+        sb.image_size = min_image_size
+
+    ## Pad buf to image_size with zeros
+    var i2 = bytes_len(buf)
+    while i2 < sb.image_size:
+        bytes_push(buf, 0)
+        i2 = i2 + 1
+
+    let sb_bytes = sb.serialize()
+    var j = 0
+    while j < bytes_len(sb_bytes):
+        bytes_set(buf, j, bytes_get(sb_bytes, j))
+        j = j + 1
 
     if io.filesize(dev) > 0 and not opts["force"]:
         print "error: " + dev + " already exists (use --force to overwrite)"
@@ -153,8 +178,20 @@ proc format_device(dev: String, opts: Dict) -> Bool:
     return true
 
 proc verify_image(dev: String) -> Bool:
-    let buf = imgio.read_image(dev)
-    let ok = true
+    let is_bdev = imgio._is_block_device(dev)
+    var buf: Bytes = bytes()
+    if is_bdev:
+        let header = imgio.read_image_exact(dev, superblock.SUPERBLOCK_HEADER_SIZE)
+        if bytes_len(header) < 428:
+            print "verify: FAIL (image too small: " + str(bytes_len(header)) + " bytes)"
+            return false
+        let sb = superblock.deserialize_superblock(header)
+        let needed = sb.image_size
+        if needed < superblock.SUPERBLOCK_HEADER_SIZE:
+            needed = superblock.SUPERBLOCK_HEADER_SIZE
+        buf = imgio.read_image_exact(dev, needed)
+    else:
+        buf = imgio.read_image(dev)
     if bytes_len(buf) < 428:
         print "verify: FAIL (image too small: " + str(bytes_len(buf)) + " bytes)"
         return false

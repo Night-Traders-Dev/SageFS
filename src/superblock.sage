@@ -36,13 +36,16 @@ let SAGEFS_MAGIC: Int = 0x53414745
 
 ## On-disk format version
 let SAGEFS_VERSION_MAJOR: Int = 1
-let SAGEFS_VERSION_MINOR: Int = 0
+let SAGEFS_VERSION_MINOR: Int = 2
 
 ## Default block size in bytes (must be power-of-two, >= 4096)
 let DEFAULT_BLOCK_SIZE: Int = 4096
 
 ## Default segment size in blocks (each segment = 512 * 4096 = 2 MiB)
 let DEFAULT_SEGMENT_SIZE: Int = 512
+
+## Number of bytes needed to read the superblock header (including image_size and inode area fields)
+let SUPERBLOCK_HEADER_SIZE: Int = 452
 
 ## Byte offsets of the two superblock copies
 let SUPERBLOCK_OFFSET: Int = 0
@@ -224,6 +227,12 @@ proc is_power_of_two(n: Int) -> Bool:
     return (n & (n - 1)) == 0
 
 # ===========================================================================
+## Number of blocks reserved before the NAT (superblocks, checkpoint packs, inode area)
+let RESERVED_BLKS: Int = 16
+
+## Number of blocks reserved for inode entries (after superblocks/checkpoint packs)
+let INODE_ENTRY_RESERVED_BLKS: Int = 8
+
 # Layout computation
 # ===========================================================================
 
@@ -245,8 +254,7 @@ proc compute_layout(total_blocks: Int, block_size: Int, segment_size: Int) -> Di
     ## Number of segments in the entire volume (round down)
     let total_segments: Int = int(total_blocks / segment_size)
 
-    ## Reserve first 8 blocks for superblocks (2) + checkpoint packs (up to 6)
-    let reserved_blocks: Int = 8
+    ## Reserve first 16 blocks for superblocks, checkpoint packs, and inode entry area
 
     ## ------------------------------------------------------------------
     ## SIT: one bit per segment (valid/invalid) plus per-segment metadata.
@@ -300,7 +308,7 @@ proc compute_layout(total_blocks: Int, block_size: Int, segment_size: Int) -> Di
     ## ------------------------------------------------------------------
     ## Assign starting block offsets
     ## ------------------------------------------------------------------
-    let nat_start: Int = reserved_blocks
+    let nat_start: Int = RESERVED_BLKS
     let sit_start: Int = nat_start + nat_segments * segment_size
     let ssa_start: Int = sit_start + sit_segments * segment_size
     let main_start: Int = ssa_start + ssa_segments * segment_size
@@ -312,6 +320,8 @@ proc compute_layout(total_blocks: Int, block_size: Int, segment_size: Int) -> Di
     layout["main_start"] = main_start
     layout["nat_segments"] = nat_segments
     layout["sit_segments"] = sit_segments
+    layout["inode_entry_start_blk"] = 8
+    layout["inode_entry_byte_size"] = INODE_ENTRY_RESERVED_BLKS * block_size
     return layout
 
 # ===========================================================================
@@ -370,6 +380,11 @@ class SageFSSuperblock:
         self.mount_count = 0
         self.max_mount_count = 1000  # suggest fsck after this many mounts
         self.state = STATE_CLEAN
+
+        # -- image footprint --
+        self.image_size = 0          # total bytes of the image buffer (block device hint)
+        self.inode_entry_start_blk = 0  # block offset for reserved inode entry area
+        self.inode_entry_byte_size = 0  # size of inode entry area in bytes
 
         # -- integrity --
         self.checksum = 0
@@ -445,6 +460,9 @@ class SageFSSuperblock:
         payload = payload + str(self.mount_count)
         payload = payload + str(self.max_mount_count)
         payload = payload + str(self.state)
+        payload = payload + str(self.image_size)
+        payload = payload + str(self.inode_entry_start_blk)
+        payload = payload + str(self.inode_entry_byte_size)
 
         let raw: Int = hash(payload)
         ## Ensure non-negative 32-bit value
@@ -513,9 +531,13 @@ class SageFSSuperblock:
         ##   412-415 : mount_count    (LE32)
         ##   416-419 : max_mount_count(LE32)
         ##   420-423 : state          (LE32)
-        ##   424-427 : checksum       (LE32)
+        ##   424-431 : image_size     (LE64)  — v1.1+
+        ##   432-439 : inode_entry_start_blk (LE64) — v1.2+
+        ##   440-447 : inode_entry_byte_size (LE64) — v1.2+
+        ##   448-451 : checksum       (LE32)
         ##
-        ## Total fixed size: 428 bytes.  The remainder of the block is zero.
+        ## Total fixed size: 452 bytes (v1.0 = 428, v1.1 = 436).
+        ## The remainder of the block is zero.
 
         let buf: Bytes = bytes()
 
@@ -554,8 +576,13 @@ class SageFSSuperblock:
         write_le32(buf, self.max_mount_count) # 416
         write_le32(buf, self.state)           # 420
 
+        # -- image footprint & inode entry area (v1.1+) --
+        write_le64(buf, self.image_size)      # 424
+        write_le64(buf, self.inode_entry_start_blk)  # 432
+        write_le64(buf, self.inode_entry_byte_size)  # 440
+
         # -- integrity checksum (must be last) --
-        write_le32(buf, self.checksum)        # 424
+        write_le32(buf, self.checksum)        # 448
 
         return buf
 
@@ -592,6 +619,9 @@ class SageFSSuperblock:
         d["mount_count"] = self.mount_count
         d["max_mount_count"] = self.max_mount_count
         d["state"] = self.state
+        d["image_size"] = self.image_size
+        d["inode_entry_start_blk"] = self.inode_entry_start_blk
+        d["inode_entry_byte_size"] = self.inode_entry_byte_size
         d["checksum"] = self.checksum
         return d
 
@@ -621,6 +651,9 @@ class SageFSSuperblock:
         s = s + "  create_time:     " + str(self.create_time) + "\n"
         s = s + "  mount_count:     " + str(self.mount_count) + "/" + str(self.max_mount_count) + "\n"
         s = s + "  state:           " + str(self.state) + "\n"
+        s = s + "  image_size:      " + str(self.image_size) + " bytes\n"
+        s = s + "  inode_entry_blk: " + str(self.inode_entry_start_blk) + "\n"
+        s = s + "  inode_entry_size:" + str(self.inode_entry_byte_size) + " bytes\n"
         s = s + "  checksum:        0x" + str(self.checksum) + "\n"
         return s
 
@@ -651,7 +684,26 @@ proc deserialize_superblock(buf: Bytes) -> SageFSSuperblock:
     sb.mount_count   = read_le32(buf, 412)
     sb.max_mount_count = read_le32(buf, 416)
     sb.state         = read_le32(buf, 420)
-    sb.checksum      = read_le32(buf, 424)
+    ## v1.1+ fields (image_size at 424)
+    if sb.version_minor >= 1 and bytes_len(buf) >= 436:
+        sb.image_size = read_le64(buf, 424)
+    else:
+        sb.image_size = 0
+
+    ## v1.2+ fields (inode_entry_start_blk at 432, inode_entry_byte_size at 440)
+    if sb.version_minor >= 2 and bytes_len(buf) >= 452:
+        sb.inode_entry_start_blk = read_le64(buf, 432)
+        sb.inode_entry_byte_size = read_le64(buf, 440)
+    else:
+        sb.inode_entry_start_blk = 0
+        sb.inode_entry_byte_size = 0
+
+    if sb.version_minor >= 2:
+        sb.checksum = read_le32(buf, 448)
+    elif sb.version_minor >= 1:
+        sb.checksum = read_le32(buf, 432)
+    else:
+        sb.checksum = read_le32(buf, 424)
     return sb
 
 # ===========================================================================
@@ -1101,6 +1153,8 @@ proc create_superblock(total_blocks: Int, label: String, block_size: Int, segmen
     sb.sit_start_blk = layout["sit_start"]
     sb.ssa_start_blk = layout["ssa_start"]
     sb.main_start_blk = layout["main_start"]
+    sb.inode_entry_start_blk = layout["inode_entry_start_blk"]
+    sb.inode_entry_byte_size = layout["inode_entry_byte_size"]
 
     sb.uuid = generate_uuid()
     sb.label = safe_label
