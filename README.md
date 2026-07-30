@@ -198,6 +198,10 @@ SageFS/
 │   ├── mkfs.sage                  # Filesystem formatter
 │   ├── mount.sage                 # Mount helper
 │   ├── fsck.sage                  # Filesystem checker
+│   ├── kernel/
+│   │   ├── sagefs.c              # Linux VFS kernel driver (Phase 9)
+│   │   ├── Makefile              # Kernel module build
+│   │   └── README.md             # Build & usage
 │   └── tools/                     # CLI utilities
 ├── docs/                          # Documentation
 ├── testing/                       # Test suite
@@ -249,12 +253,12 @@ Unlike BTRFS's uniform compression policy, SageFS selects compression algorithms
 
 See [plan.md](plan.md) for the full development plan.
 
-**Current progress:** Phases 1–6 complete. 16 test files (343 tests) all passing. SageFS **FFI integration complete** (Phase 1) — SageVM can now call libfuse3 via FFI, enabling native kernel driver integration.
+**Current progress:** Phases 1–6 complete. 16 test files (343 tests) all passing. SageFS **FFI integration complete** (Phase 1) — SageVM can now call libfuse3 via FFI, enabling native kernel driver integration. Kernel VFS driver mounts successfully (nodev) but OOM's on readdir/unmount due to `i_lru` initialization issue in kernel 7.1.
 
 ### Phase 7+: Kernel Driver Integration
 - **Phase 7:** SageVM FFI backend (sage_ffi_call with type marshaling for C functions) — ✅ Done
 - **Phase 8:** SageFS FUSE FFI integration (fuse_init, fuse_run with /dev/fuse direct I/O, libfuse3 session support) — ✅ Done
-- **Phase 9:** Linux kernel driver (sagefs.ko) with character device `/dev/sagefs` and ioctl interface — ⏳ In progress (skeleton at src/kernel/)
+- **Phase 9:** Linux kernel VFS driver (`sagefs.ko`) implementing `mount -t sagefs` directly through the kernel block layer — ⏳ In progress (mount/stat works; OOM on readdir/umount; see `docs/kernel_driver.md`)
 - **SageVM v1.0.0:** Updated to latest SageVM (GA) and SageLang — full test conformance, JIT engine, dual-architecture (SVM stack + SRVM RISC-V) support, security sandboxing.
 - **VFS write persistence:** Fixed `write()` to persist data to in-memory inode entries, enabling create/write/read cycles.
 - **FFI Integration (Phase 1):** SageVM now supports native FFI calling (sage_ffi_call with type marshaling). SageFS FUSE module has FFI session initialization with libfuse3 and Python bridge fallback. fuse_run implements native /dev/fuse event loop via libc FFI (ABI 7.26). mount.sage supports mountpoint argument.
@@ -332,7 +336,7 @@ SageFS now provides a unified command-line interface for all filesystem operatio
 ✓ **FFI-native deployment** (Phase 1)
 - Native `/dev/fuse` direct I/O via SageVM FFI eliminates Python bridge dependency
 - Consistent interface across all SageFS operations
-- Kernel driver (`sagefs.ko`) bridge via `/dev/sagefs` char device (Phase 9 skeleton)
+- Kernel driver (`sagefs.ko`) — VFS filesystem driver for `mount -t sagefs` (see `docs/kernel_driver.md`)
 
 ---
 

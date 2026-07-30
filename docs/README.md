@@ -31,7 +31,6 @@ This directory contains per-component design and API documentation for SageFS. E
 | [fuse.md](fuse.md) | `src/fuse.sage` | 6 | ✅ Implemented |
 | [imgio.md](imgio.md) | `src/imgio.sage` | 6 | ✅ Implemented |
 | [kernel_driver.md](kernel_driver.md) | `src/kernel/sagefs.c` | 9 | 🔄 In Progress |
-| [kernel_driver.md](kernel_driver.md) | `src/kernel/sagefs.c` | 9 | 🔄 In Progress |
 
 ## Reading Order
 
@@ -70,31 +69,33 @@ For newcomers, we recommend reading the documentation in dependency order:
 - **Segment size:** 512 blocks = 2 MiB (default).
 - **Integers:** SageLang `Int` is a tagged 64-bit value; fixed-width arithmetic is enforced by masking (`& 0xFFFFFFFF`, `& 0xFFFFFFFFFFFFFFFF`).
 
-## FFI Bridge Implementation Status
+## Kernel Driver Implementation Status
 
-SageFS now uses **native FFI** via `/dev/fuse` direct I/O, eliminating the Python bridge dependency. The kernel driver (`sagefs.ko`) provides a character device `/dev/sagefs` for kernel↔userspace communication.
+SageFS now includes a native Linux VFS kernel module (`src/kernel/sagefs.c`) that registers
+as a filesystem type via `init_fs_context` + `get_tree_nodev`/`get_tree_bdev`. Unlike the
+earlier char-device + sysfs daemon architecture, the VFS driver communicates directly with
+the kernel block layer via `sb_bread`/`brelse`, eliminating the need for a userspace daemon.
 
-### Current Architecture (Post-FFI)
+### Current Architecture
 
 ```
-Kernel                        Kernel
-────────                      ─────
-  sagefs.ko                   → /dev/sagefs (char dev)
-      └─ ioctl                   └─ SageFS Daemon
-          └─ SageFS VFS layer
-              └─ /dev/fuse (native FFI loop)
-                  └─ SageVM bytecode
-                      └─ Storage Engine
+Kernel VFS Layer
+    └─ sagefs.ko (VFS filesystem driver)
+        └─ init_fs_context → get_tree_nodev/get_tree_bdev
+            └─ fill_super → sagefs_iget → inode ops
+                └─ Block Layer (sb_bread / sb_bread)
+                    └─ On-disk format (block device / image file)
 ```
 
 ## Architecture Overview
 
-### Current Native FFI Implementation
-- **FUSE Bridge:** Native `/dev/fuse` direct I/O via SageVM FFI (ABI 7.26)
+### Current Architecture
+
+- **FUSE Bridge:** Native `/dev/fuse` direct I/O via SageVM FFI (ABI 7.26) — primary userspace mount path
 - **VFS Layer:** SageVM with POSIX operations via FFI
 - **Binary Format:** Native image format (block-aligned, little-endian)
-- **Kernel Driver:** sagefs.ko skeleton with `/dev/sagefs` char device (Phase 9)
-- **Kernel↔Userspace:** ioctl interface for mount/read/write/flush/sync operations
+- **Kernel Driver:** sagefs.ko VFS filesystem driver — `mount -t sagefs` directly via kernel block layer (Phase 9)
+- **Kernel↔Userspace:** Direct VFS + block layer (no ioctl/sysfs daemon needed)
 
 ## Reading Order
 

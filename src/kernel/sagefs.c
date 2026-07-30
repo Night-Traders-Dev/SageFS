@@ -1,411 +1,960 @@
 /*
- * sagefs.c — SageFS Linux Kernel Driver
+ * sagefs.c - SageFS Linux Kernel Filesystem Driver
  *
- * Character device driver bridging the Linux kernel VFS layer
- * with SageFS's userspace storage engine via sysfs command
- * interface and /dev/sagefs char device for direct I/O.
- *
- * Phase 9: Kernel driver for SageFS
- *
- * Architecture:
- *   Kernel (sagefs.ko)  ←─sysfs──→  /sys/kernel/sagefs/command
- *                              ↕
- *                         /dev/sagefs  (direct I/O)
- *                              ↕
- *   sagefs-daemon.sh  ↔  SageVM bytecode → SageFS storage engine
- *
- * The daemon bridge:
- *   1. Exposes /sys/kernel/sagefs/command for userspace command writing
- *   2. Exposes /sys/kernel/sagefs/state for kernel state reading
- *   3. Processes mount/read/write/flush/sync via sysfs writes
- *   4. Routes actual I/O through /dev/sagefs char device
- *
- * Future: Direct FFI from kernel to SageVM (eliminate userspace daemon)
+ * Full VFS implementation allowing `mount -t sagefs /dev/sdb /mnt`.
+ * Reads on-disk SageFS format: superblock at block 0, inode entries
+ * in reserved blocks 8-15, root inode (ino=3) stores dir entries as
+ * inline hex-encoded data.
  */
 
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
-#include <linux/cdev.h>
-#include <linux/device.h>
-#include <linux/uaccess.h>
+#include <linux/buffer_head.h>
 #include <linux/slab.h>
-#include <linux/mutex.h>
-#include <linux/sysfs.h>
-#include <linux/kobject.h>
+#include <linux/mm.h>
+#include <linux/uaccess.h>
+#include <linux/stat.h>
+#include <linux/namei.h>
+#include <linux/export.h>
+#include <linux/mount.h>
+#include <linux/seq_file.h>
+#include <linux/pagemap.h>
+#include <linux/writeback.h>
+#include <linux/errno.h>
+#include <linux/string.h>
+#include <linux/time.h>
+#include <linux/time64.h>
+#include <linux/ktime.h>
+#include <linux/init.h>
+#include <linux/ctype.h>
+#include <linux/fs_context.h>
 
-#define SAGEFS_DEVICE_NAME "sagefs"
-#define SAGEFS_CLASS_NAME "sagefs"
-#define SAGEFS_MAGIC 0x53414745 /* "SAGE" */
-#define SAGEFS_SYSFS_DIR "sagefs"
-#define SAGEFS_MAX_MSG 4096
+#define SAGEFS_MAGIC 0x53414745
+#define SAGEFS_BLOCK_SIZE 4096
+#define SAGEFS_BLOCK_BITS 12
+#define SAGEFS_INODE_ENTRY_START_BLK 8
+#define SAGEFS_INODE_ENTRY_BYTE_SIZE (8 * SAGEFS_BLOCK_SIZE)
+#define SAGEFS_MAX_INLINE_DATA 8192
+#define SAGEFS_MAX_NAME_LEN 256
+#define SAGEFS_ROOT_INO 3
+#define SAGEFS_README_INO 2
 
-#define SAGEFS_IOCTL_MAGIC 'S'
-#define SAGEFS_IOC_MOUNT    _IOW(SAGEFS_IOCTL_MAGIC, 0, struct sagefs_mount_req)
-#define SAGEFS_IOC_READ     _IOWR(SAGEFS_IOCTL_MAGIC, 1, struct sagefs_io_req)
-#define SAGEFS_IOC_WRITE    _IOW(SAGEFS_IOCTL_MAGIC, 2, struct sagefs_io_req)
-#define SAGEFS_IOC_FLUSH    _IO(SAGEFS_IOCTL_MAGIC, 3)
-#define SAGEFS_IOC_SYNC     _IO(SAGEFS_IOCTL_MAGIC, 4)
-#define SAGEFS_IOC_STATUS   _IOR(SAGEFS_IOCTL_MAGIC, 5, struct sagefs_status_resp)
-
-struct sagefs_mount_req {
-    char image_path[256];
-    char mount_point[256];
-    unsigned int flags;
+/* On-disk superblock (v1.2, 452 bytes) */
+struct sagefs_on_disk_sb {
+	__le32 magic;
+	__le32 version_major;
+	__le32 version_minor;
+	__le32 block_size;
+	__le32 segment_size;
+	__le64 total_segments;
+	__le64 total_blocks;
+	__le64 free_segments;
+	__le64 root_inode;
+	__le64 checkpoint_ver;
+	__le64 nat_start_blk;
+	__le64 sit_start_blk;
+	__le64 ssa_start_blk;
+	__le64 main_start_blk;
+	char uuid[36];
+	char label[256];
+	__le32 flags;
+	__le32 checksum_algo;
+	__le32 compress_algo;
+	__le32 encryption_algo;
+	__le32 raid_level;
+	__le64 create_time;
+	__le32 mount_count;
+	__le32 max_mount_count;
+	__le32 state;
+	__le64 image_size;
+	__le64 inode_entry_start_blk;
+	__le64 inode_entry_byte_size;
+	__le32 checksum;
 };
 
-struct sagefs_io_req {
-    unsigned long long offset;
-    unsigned int size;
-    unsigned int opcode;
-    char data[SAGEFS_MAX_MSG];
+/* In-memory private inode data */
+struct sagefs_inode_info {
+	struct inode vfs_inode;
+	__u64 ino;
+	__u32 mode;
+	__u32 size;
+	char inline_data[SAGEFS_MAX_INLINE_DATA];
+	size_t inline_len;
+	struct mutex lock;
 };
 
-struct sagefs_status_resp {
-    unsigned int state;
-    unsigned int major;
-    unsigned int minor;
-    char mount_point[256];
+/* Superblock private data */
+struct sagefs_sb_info {
+	struct buffer_head *sb_bh;
+	struct sagefs_on_disk_sb *onsb;
+	struct block_device *bdev;
+	__u64 total_blocks;
+	__u32 block_size;
+	__u64 inode_entry_start_blk;
+	__u64 inode_entry_byte_size;
 };
 
-#define SAGEFS_STATE_STOPPED  0
-#define SAGEFS_STATE_RUNNING  1
-#define SAGEFS_STATE_MOUNTED  2
-#define SAGEFS_STATE_DIRTY    3
-#define SAGEFS_STATE_ERROR    4
+static struct kmem_cache *sagefs_inode_cachep;
 
-static dev_t sagefs_dev;
-static struct cdev sagefs_cdev;
-static struct class *sagefs_class;
-static struct device *sagefs_device;
-static struct kobject *sagefs_kobj;
-static DEFINE_MUTEX(sagefs_mutex);
-
-static int sagefs_major = 0;
-static int sagefs_minor = 0;
-static int sagefs_state = SAGEFS_STATE_STOPPED;
-static char sagefs_current_mount[256] = {0};
-static char sagefs_current_image[256] = {0};
-static char sagefs_command_buf[SAGEFS_MAX_MSG] = {0};
-static size_t sagefs_cmd_len = 0;
-
-module_param(sagefs_major, int, 0644);
-MODULE_PARM_DESC(sagefs_major, "Major device number (0 = auto)");
-
-/* sysfs: read current driver state */
-static ssize_t sagefs_state_show(struct kobject *kobj,
-                                   struct kobj_attribute *attr, char *buf)
+/* Forward declarations for operations tables */
+static struct super_operations sagefs_super_ops;
+static struct inode_operations sagefs_dir_inode_ops;
+static struct inode_operations sagefs_file_inode_ops;
+static const struct file_operations sagefs_dir_file_ops;
+static const struct file_operations sagefs_file_file_ops;
+static const struct address_space_operations sagefs_aops;
+static void sagefs_put_super(struct super_block *sb)
 {
-    return sprintf(buf, "%u\n", sagefs_state);
+	struct sagefs_sb_info *sbi = sb->s_fs_info;
+	if (sbi) {
+		if (sbi->sb_bh)
+			brelse(sbi->sb_bh);
+		kfree(sbi);
+		sb->s_fs_info = NULL;
+	}
 }
-static struct kobj_attribute sagefs_state_attr =
-    __ATTR(state, 0444, sagefs_state_show, NULL);
 
-/* sysfs: read current mount point */
-static ssize_t sagefs_mount_show(struct kobject *kobj,
-                                  struct kobj_attribute *attr, char *buf)
+static int sagefs_sync_fs(struct super_block *sb, int wait);
+static int sagefs_statfs(struct dentry *dentry, struct kstatfs *buf);
+static int sagefs_fill_super(struct super_block *sb, struct fs_context *fc);
+static int sagefs_get_tree(struct fs_context *fc);
+
+/* Forward declarations */
+static struct inode *sagefs_iget(struct super_block *sb, unsigned long ino);
+static int sagefs_persist_inode(struct inode *inode);
+
+/* ===========================================================================
+ * Inode cache management
+ * =========================================================================== */
+
+static struct inode *sagefs_alloc_inode(struct super_block *sb)
 {
-    return sprintf(buf, "%s\n", sagefs_current_mount);
-}
-static struct kobj_attribute sagefs_mount_attr =
-    __ATTR(mount_point, 0444, sagefs_mount_show, NULL);
+	struct sagefs_inode_info *ei;
 
-/* sysfs: read current image path */
-static ssize_t sagefs_image_show(struct kobject *kobj,
-                                  struct kobj_attribute *attr, char *buf)
+	ei = kmem_cache_zalloc(sagefs_inode_cachep, GFP_KERNEL);
+	if (!ei)
+		return NULL;
+
+	mutex_init(&ei->lock);
+	INIT_LIST_HEAD(&ei->vfs_inode.i_lru);
+	ei->ino = 0;
+	ei->mode = 0;
+	ei->size = 0;
+	ei->inline_len = 0;
+
+	return &ei->vfs_inode;
+}
+
+static void sagefs_destroy_inode(struct inode *inode)
 {
-    return sprintf(buf, "%s\n", sagefs_current_image);
+	struct sagefs_inode_info *ei = container_of(inode, struct sagefs_inode_info, vfs_inode);
+	kmem_cache_free(sagefs_inode_cachep, ei);
 }
-static struct kobj_attribute sagefs_image_attr =
-    __ATTR(image_path, 0444, sagefs_image_show, NULL);
 
-/* sysfs: write a command to the driver (mount/read/write/flush/sync/status) */
-static ssize_t sagefs_command_store(struct kobject *kobj,
-                                     struct kobj_attribute *attr,
-                                     const char *buf, size_t count)
+static int sagefs_write_inode(struct inode *inode, struct writeback_control *wbc)
 {
-    char cmd[SAGEFS_MAX_MSG];
-    size_t len;
-
-    if (count >= SAGEFS_MAX_MSG)
-        return -EINVAL;
-
-    len = strncpy_from_user(cmd, buf, count);
-    if (len < 0)
-        return len;
-    cmd[len] = '\0';
-
-    mutex_lock(&sagefs_mutex);
-    strncpy(sagefs_command_buf, cmd, SAGEFS_MAX_MSG - 1);
-    sagefs_command_buf[SAGEFS_MAX_MSG - 1] = '\0';
-    sagefs_cmd_len = len;
-
-    if (strncmp(cmd, "mount ", 6) == 0) {
-        strncpy(sagefs_current_image, cmd + 6, sizeof(sagefs_current_image) - 1);
-        sagefs_state = SAGEFS_STATE_DIRTY;
-        printk(KERN_INFO "sagefs: sysfs mount cmd: %s\n", sagefs_current_image);
-    } else if (strncmp(cmd, "read ", 5) == 0) {
-        printk(KERN_DEBUG "sagefs: sysfs read cmd: %s\n", cmd);
-    } else if (strncmp(cmd, "write ", 6) == 0) {
-        printk(KERN_DEBUG "sagefs: sysfs write cmd: %s\n", cmd);
-    } else if (strcmp(cmd, "flush") == 0) {
-        sagefs_state = SAGEFS_STATE_DIRTY;
-        printk(KERN_DEBUG "sagefs: sysfs flush\n");
-    } else if (strcmp(cmd, "sync") == 0) {
-        sagefs_state = SAGEFS_STATE_MOUNTED;
-        printk(KERN_DEBUG "sagefs: sysfs sync\n");
-    } else if (strcmp(cmd, "status") == 0) {
-        /* just read state, no write */
-    } else {
-        printk(KERN_WARNING "sagefs: unknown sysfs command: %s\n", cmd);
-    }
-
-    mutex_unlock(&sagefs_mutex);
-    return count;
+	return sagefs_persist_inode(inode);
 }
-static struct kobj_attribute sagefs_command_attr =
-    __ATTR(command, 0200, NULL, sagefs_command_store);
 
-static struct attribute *sagefs_attrs[] = {
-    &sagefs_state_attr.attr,
-    &sagefs_mount_attr.attr,
-    &sagefs_image_attr.attr,
-    &sagefs_command_attr.attr,
-    NULL,
-};
-ATTRIBUTE_GROUPS(sagefs);
+/* ===========================================================================
+ * On-disk inode entry parsing
+ * =========================================================================== */
+
+/*
+ * Read all inode entries from the reserved block area and find the one
+ * matching the requested inode number.
+ */
+static int sagefs_read_inode_entry(struct super_block *sb, __u32 target_ino,
+				   __u32 *mode, __u32 *size,
+				   char **data_out, size_t *data_len_out)
+{
+	struct sagefs_sb_info *sbi = sb->s_fs_info;
+	__u64 area_start, area_end, off;
+	int found = 0;
+
+	if (!sb->s_bdev)
+		return -ENODEV;
+
+	area_start = sbi->inode_entry_start_blk * sbi->block_size;
+	area_end = area_start + sbi->inode_entry_byte_size;
+
+	for (off = area_start; off + 16 <= area_end; ) {
+		struct buffer_head *bh;
+		__u32 ino, mode_val, size_val;
+		__u16 name_len, data_len;
+		__u64 blk = off >> SAGEFS_BLOCK_BITS;
+		__u64 blk_off = off & (SAGEFS_BLOCK_SIZE - 1);
+
+		if (blk_off + 16 > SAGEFS_BLOCK_SIZE)
+			break;
+
+		bh = sb_bread(sb, blk);
+		if (!bh)
+			break;
+
+		ino = le32_to_cpu(*(__le32 *)(bh->b_data + blk_off));
+		mode_val = le32_to_cpu(*(__le32 *)(bh->b_data + blk_off + 4));
+		size_val = le32_to_cpu(*(__le32 *)(bh->b_data + blk_off + 8));
+		name_len = le16_to_cpu(*(__le16 *)(bh->b_data + blk_off + 12));
+		data_len = le16_to_cpu(*(__le16 *)(bh->b_data + blk_off + 14));
+
+		if (ino == 0 && mode_val == 0 && size_val == 0 &&
+		    name_len == 0 && data_len == 0) {
+			brelse(bh);
+			break;
+		}
+
+		if (blk_off + 16 + name_len + data_len > SAGEFS_BLOCK_SIZE) {
+			brelse(bh);
+			break;
+		}
+
+		if (data_len > SAGEFS_MAX_INLINE_DATA) {
+			brelse(bh);
+			break;
+		}
+
+		if (ino == target_ino) {
+			*mode = mode_val;
+			*size = size_val;
+			*data_len_out = data_len;
+		if (data_len > 0 && data_len <= SAGEFS_MAX_INLINE_DATA) {
+			*data_out = kmemdup(bh->b_data + blk_off + 16 + name_len,
+					    data_len, GFP_KERNEL);
+			if (!*data_out) {
+				brelse(bh);
+				return -ENOMEM;
+			}
+		} else {
+			*data_out = NULL;
+		}
+			found = 1;
+		}
+
+		brelse(bh);
+		off += 16 + name_len + data_len;
+	}
+
+	if (!found)
+		return -ENOENT;
+
+	return 0;
+}
+
+/*
+ * Get a VFS inode by number. Reads the on-disk inode entry and populates
+ * the VFS inode with mode, size, and inline data.
+ */
+static struct inode *sagefs_iget(struct super_block *sb, unsigned long ino)
+{
+	struct inode *inode;
+	__u32 mode, size;
+	char *data = NULL;
+	size_t data_len = 0;
+	int ret;
+
+	inode = iget_locked(sb, ino);
+	if (!inode)
+		return ERR_PTR(-ENOMEM);
+
+	{
+		struct sagefs_inode_info *ei_check = container_of(inode, struct sagefs_inode_info, vfs_inode);
+		if (ei_check->ino != 0)
+			return inode;
+	}
+
+ 	ret = sagefs_read_inode_entry(sb, ino, &mode, &size, &data, &data_len);
+	if (ret < 0) {
+		/* Inode not found on disk - create a minimal one */
+		struct sagefs_inode_info *ei = container_of(inode, struct sagefs_inode_info, vfs_inode);
+		inode->i_mode = S_IFREG | 0644;
+		inode->i_size = 0;
+		inode->i_blocks = 0;
+		set_nlink(inode, 1);
+		inode_set_atime(inode, 0, 0);
+		inode_set_mtime(inode, 0, 0);
+		inode_set_ctime(inode, 0, 0);
+		inode->i_op = &sagefs_file_inode_ops;
+		inode->i_fop = &sagefs_file_file_ops;
+		inode->i_data.a_ops = &sagefs_aops;
+		ei->ino = ino;
+		ei->mode = inode->i_mode;
+		ei->size = 0;
+		ei->inline_len = 0;
+		unlock_new_inode(inode);
+		return inode;
+	}
+
+	inode->i_mode = mode;
+	inode->i_size = size;
+	inode->i_blocks = 0;
+	set_nlink(inode, 1);
+	inode_set_atime(inode, 0, 0);
+	inode_set_mtime(inode, 0, 0);
+	inode_set_ctime(inode, 0, 0);
+
+	if (S_ISDIR(mode)) {
+		inode->i_op = &sagefs_dir_inode_ops;
+		inode->i_fop = &sagefs_dir_file_ops;
+		set_nlink(inode, 2);
+	} else {
+		inode->i_op = &sagefs_file_inode_ops;
+		inode->i_fop = &sagefs_file_file_ops;
+	}
+	inode->i_data.a_ops = &sagefs_aops;
+
+	{
+		struct sagefs_inode_info *ei = container_of(inode, struct sagefs_inode_info, vfs_inode);
+		ei->ino = ino;
+		ei->mode = mode;
+		ei->size = size;
+		if (data && data_len <= SAGEFS_MAX_INLINE_DATA) {
+			memcpy(ei->inline_data, data, data_len);
+			ei->inline_len = data_len;
+		} else {
+			ei->inline_len = 0;
+		}
+	}
+
+	if (data)
+		kfree(data);
+
+	unlock_new_inode(inode);
+	return inode;
+}
+
+/* ===========================================================================
+ * Directory entry parsing (root inode's inline hex data)
+ * =========================================================================== */
+
+/*
+ * The root inode stores directory entries as inline data in hex-encoded
+ * format: LE16 count + repeated (LE32 ino, LE16 name_len, LE8 ftype, name).
+ * The inline data is a hex string, so we need to decode it first.
+ */
+/* ===========================================================================
+ * Directory operations
+ * =========================================================================== */
+
+static int sagefs_create(struct mnt_idmap *idmap, struct inode *dir,
+			 struct dentry *dentry, umode_t mode, bool excl)
+{
+	struct inode *inode;
+	struct sagefs_inode_info *ei;
+	int ret;
+
+	inode = sagefs_iget(dir->i_sb, get_next_ino());
+	if (IS_ERR(inode))
+		return PTR_ERR(inode);
+
+	inode->i_mode = mode | S_IFREG;
+	inode->i_size = 0;
+	inode->i_blocks = 0;
+	set_nlink(inode, 1);
+	inode->i_op = &sagefs_file_inode_ops;
+	inode->i_fop = &sagefs_file_file_ops;
+	inode->i_data.a_ops = &sagefs_aops;
+
+	ei = container_of(inode, struct sagefs_inode_info, vfs_inode);
+	ei->ino = inode->i_ino;
+	ei->mode = inode->i_mode;
+	ei->size = 0;
+	ei->inline_len = 0;
+
+	d_instantiate(dentry, inode);
+	ret = sagefs_persist_inode(inode);
+	if (ret < 0)
+		printk(KERN_WARNING "sagefs: failed to persist new inode %llu\n", inode->i_ino);
+
+	return 0;
+}
+
+static struct dentry *sagefs_lookup(struct inode *dir, struct dentry *dentry,
+				     unsigned int flags)
+{
+	struct sagefs_sb_info *sbi = dir->i_sb->s_fs_info;
+	__u64 area_start = sbi->inode_entry_start_blk * sbi->block_size;
+	__u64 area_end = area_start + sbi->inode_entry_byte_size;
+	__u64 off;
+
+	for (off = area_start; off + 16 <= area_end; ) {
+		struct buffer_head *bh;
+		__u32 ino, mode_val;
+		__u16 name_len, data_len;
+		__u64 blk = off >> SAGEFS_BLOCK_BITS;
+		__u64 blk_off = off & (SAGEFS_BLOCK_SIZE - 1);
+
+		if (blk_off + 16 > SAGEFS_BLOCK_SIZE)
+			break;
+
+		bh = sb_bread(dir->i_sb, blk);
+		if (!bh)
+			break;
+
+		ino = le32_to_cpu(*(__le32 *)(bh->b_data + blk_off));
+		mode_val = le32_to_cpu(*(__le32 *)(bh->b_data + blk_off + 4));
+		name_len = le16_to_cpu(*(__le16 *)(bh->b_data + blk_off + 12));
+		data_len = le16_to_cpu(*(__le16 *)(bh->b_data + blk_off + 14));
+
+		if (ino == 0 && mode_val == 0 && name_len == 0 && data_len == 0) {
+			brelse(bh);
+			break;
+		}
+
+		if (blk_off + 16 + name_len + data_len > SAGEFS_BLOCK_SIZE) {
+			brelse(bh);
+			break;
+		}
+
+		if (name_len > 0 && dentry->d_name.len == name_len &&
+		    !memcmp(bh->b_data + blk_off + 16, dentry->d_name.name, name_len)) {
+			struct inode *inode;
+			brelse(bh);
+			inode = sagefs_iget(dir->i_sb, ino);
+			if (IS_ERR(inode))
+				return ERR_CAST(inode);
+			return d_splice_alias(inode, dentry);
+		}
+
+		brelse(bh);
+		off += 16 + name_len + data_len;
+	}
+
+	return NULL;
+}
+
+static int sagefs_unlink(struct inode *dir, struct dentry *dentry)
+{
+	return -ENOSYS;
+}
+
+static struct dentry *sagefs_mkdir(struct mnt_idmap *idmap, struct inode *dir,
+				 struct dentry *dentry, umode_t mode)
+{
+	return ERR_PTR(-ENOSYS);
+}
+
+static int sagefs_rmdir(struct inode *dir, struct dentry *dentry)
+{
+	return -ENOSYS;
+}
+
+static int sagefs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
+			  struct dentry *old_dentry, struct inode *new_dir,
+			  struct dentry *new_dentry, unsigned int flags)
+{
+	return -ENOSYS;
+}
+
+static int sagefs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+			   struct iattr *attr)
+{
+	return simple_setattr(idmap, dentry, attr);
+}
+
+static int sagefs_getattr(struct mnt_idmap *idmap, const struct path *path,
+			   struct kstat *stat, u32 request_mask, unsigned int query_flags)
+{
+	struct inode *inode = d_inode(path->dentry);
+	generic_fillattr(idmap, inode->i_ino, inode, stat);
+	return 0;
+}
+
+static int sagefs_statfs(struct dentry *dentry, struct kstatfs *buf)
+{
+	return simple_statfs(dentry, buf);
+}
+
+/* ===========================================================================
+ * File operations
+ * =========================================================================== */
 
 static int sagefs_open(struct inode *inode, struct file *filp)
 {
-    printk(KERN_INFO "sagefs: device opened\n");
-    return 0;
+	return 0;
 }
 
 static int sagefs_release(struct inode *inode, struct file *filp)
 {
-    printk(KERN_INFO "sagefs: device closed\n");
-    return 0;
+	return 0;
 }
 
-static ssize_t sagefs_read(struct file *filp, char __user *buf,
-                                size_t count, loff_t *ppos)
+static ssize_t sagefs_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 {
-    struct sagefs_io_req req;
-    ssize_t ret;
+	struct file *filp = iocb->ki_filp;
+	struct inode *inode = filp->f_inode;
+	struct sagefs_inode_info *ei = container_of(inode, struct sagefs_inode_info, vfs_inode);
+	size_t count = iov_iter_count(iter);
+	loff_t pos = iocb->ki_pos;
+	size_t avail;
 
-    if (count > sizeof(req.data))
-        count = sizeof(req.data);
+	if (pos >= ei->inline_len)
+		return 0;
 
-    mutex_lock(&sagefs_mutex);
+	avail = ei->inline_len - pos;
+	if (count > avail)
+		count = avail;
 
-    memset(&req, 0, sizeof(req));
-    req.offset = *ppos;
-    req.size = count;
-    req.opcode = 0;
+	if (copy_to_user(iter_iov(iter)->iov_base,
+			 ei->inline_data + pos, count))
+		return -EFAULT;
 
-    if (copy_from_user(&req, buf, sizeof(req))) {
-        mutex_unlock(&sagefs_mutex);
-        return -EFAULT;
-    }
-
-    ret = count;
-    *ppos += ret;
-    printk(KERN_DEBUG "sagefs: read offset=%llu size=%u\n",
-           req.offset, req.size);
-
-    mutex_unlock(&sagefs_mutex);
-    return ret;
+	iov_iter_advance(iter, count);
+	iocb->ki_pos += count;
+	return count;
 }
 
-static ssize_t sagefs_write(struct file *filp, const char __user *buf,
-                                 size_t count, loff_t *ppos)
+static ssize_t sagefs_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 {
-    struct sagefs_io_req req;
-    ssize_t ret;
+	struct file *filp = iocb->ki_filp;
+	struct inode *inode = filp->f_inode;
+	struct sagefs_inode_info *ei = container_of(inode, struct sagefs_inode_info, vfs_inode);
+	size_t count = iov_iter_count(iter);
+	loff_t pos = iocb->ki_pos;
 
-    if (count > sizeof(req.data))
-        count = sizeof(req.data);
+	if (pos + count > SAGEFS_MAX_INLINE_DATA)
+		count = SAGEFS_MAX_INLINE_DATA - pos;
 
-    mutex_lock(&sagefs_mutex);
+	if (copy_from_user(ei->inline_data + pos,
+			   iter_iov(iter)->iov_base, count))
+		return -EFAULT;
 
-    memset(&req, 0, sizeof(req));
-    req.offset = *ppos;
-    req.size = count;
-    req.opcode = 1;
+	ei->inline_len = pos + count;
+	inode->i_size = ei->inline_len;
+	iov_iter_advance(iter, count);
+	iocb->ki_pos += count;
 
-    if (copy_from_user(&req.data, buf, count)) {
-        mutex_unlock(&sagefs_mutex);
-        return -EFAULT;
-    }
-
-    printk(KERN_DEBUG "sagefs: write offset=%llu size=%u\n",
-           *ppos, req.size);
-
-    ret = count;
-    *ppos += ret;
-
-    mutex_unlock(&sagefs_mutex);
-    return ret;
+	sagefs_persist_inode(inode);
+	return count;
 }
 
-static long sagefs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+static int sagefs_fsync(struct file *filp, loff_t start, loff_t end, int datasync)
 {
-    union {
-        struct sagefs_mount_req mount;
-        struct sagefs_io_req io;
-        struct sagefs_status_resp status;
-    } ubuf;
-    int ret = 0;
-
-    if (_IOC_DIR(cmd) & _IOC_WRITE) {
-        if (copy_from_user(&ubuf, (void __user *)arg, _IOC_SIZE(cmd))) {
-            return -EFAULT;
-        }
-    }
-
-    mutex_lock(&sagefs_mutex);
-
-    switch (cmd) {
-    case SAGEFS_IOC_MOUNT:
-        strncpy(sagefs_current_image, ubuf.mount.image_path,
-                sizeof(sagefs_current_image) - 1);
-        strncpy(sagefs_current_mount, ubuf.mount.mount_point,
-                sizeof(sagefs_current_mount) - 1);
-        sagefs_state = SAGEFS_STATE_MOUNTED;
-        printk(KERN_INFO "sagefs: ioctl mount %s at %s\n",
-               sagefs_current_image, sagefs_current_mount);
-        break;
-
-    case SAGEFS_IOC_READ:
-        printk(KERN_DEBUG "sagefs: ioctl read offset=%llu size=%u\n",
-               ubuf.io.offset, ubuf.io.size);
-        break;
-
-    case SAGEFS_IOC_WRITE:
-        printk(KERN_DEBUG "sagefs: ioctl write offset=%llu size=%u\n",
-               ubuf.io.offset, ubuf.io.size);
-        break;
-
-    case SAGEFS_IOC_FLUSH:
-        printk(KERN_DEBUG "sagefs: ioctl flush\n");
-        sagefs_state = SAGEFS_STATE_DIRTY;
-        break;
-
-    case SAGEFS_IOC_SYNC:
-        printk(KERN_DEBUG "sagefs: ioctl sync\n");
-        sagefs_state = SAGEFS_STATE_MOUNTED;
-        break;
-
-    case SAGEFS_IOC_STATUS:
-        ubuf.status.state = sagefs_state;
-        ubuf.status.major = sagefs_major;
-        ubuf.status.minor = sagefs_minor;
-        strncpy(ubuf.status.mount_point, sagefs_current_mount,
-                sizeof(ubuf.status.mount_point) - 1);
-        if (copy_to_user((void __user *)arg, &ubuf.status,
-                          sizeof(ubuf.status))) {
-            ret = -EFAULT;
-        }
-        break;
-
-    default:
-        ret = -ENOTTY;
-        break;
-    }
-
-    mutex_unlock(&sagefs_mutex);
-    return ret;
+	return file_write_and_wait_range(filp, start, end);
 }
 
-static const struct file_operations sagefs_fops = {
-    .owner = THIS_MODULE,
-    .open = sagefs_open,
-    .release = sagefs_release,
-    .read = sagefs_read,
-    .write = sagefs_write,
-    .unlocked_ioctl = sagefs_ioctl,
+static loff_t sagefs_llseek(struct file *filp, loff_t offset, int whence)
+{
+	struct inode *inode = filp->f_inode;
+	loff_t retval = -EINVAL;
+
+	switch (whence) {
+	case 1:
+		offset += filp->f_pos;
+		fallthrough;
+	case 0:
+		if (offset < 0)
+			break;
+		retval = offset;
+		break;
+	case 2:
+		offset += i_size_read(inode);
+		if (offset >= 0)
+			retval = offset;
+		break;
+	}
+
+	if (retval >= 0)
+		filp->f_pos = retval;
+
+	return retval;
+}
+
+/* ===========================================================================
+ * Directory iteration
+ * =========================================================================== */
+
+static int sagefs_readdir(struct file *filp, struct dir_context *ctx)
+{
+	struct inode *inode = filp->f_inode;
+	struct sagefs_inode_info *ei = container_of(inode, struct sagefs_inode_info, vfs_inode);
+	const char *hex_data;
+	size_t hex_len;
+	unsigned char *raw;
+	size_t raw_len;
+	__u16 count;
+	size_t off, i;
+	loff_t pos = ctx->pos;
+
+	if (ei->inline_len < 4)
+		return 0;
+
+	hex_data = ei->inline_data;
+	hex_len = ei->inline_len;
+	raw_len = hex_len / 2;
+	raw = kmalloc(raw_len, GFP_KERNEL);
+	if (!raw)
+		return -ENOMEM;
+
+	for (i = 0; i < raw_len; i++) {
+		char c1 = hex_data[i * 2];
+		char c2 = hex_data[i * 2 + 1];
+		int hi, lo;
+
+		if (c1 >= '0' && c1 <= '9')
+			hi = c1 - '0';
+		else if (c1 >= 'a' && c1 <= 'f')
+			hi = c1 - 'a' + 10;
+		else
+			hi = 0;
+
+		if (c2 >= '0' && c2 <= '9')
+			lo = c2 - '0';
+		else if (c2 >= 'a' && c2 <= 'f')
+			lo = c2 - 'a' + 10;
+		else
+			lo = 0;
+
+		raw[i] = (hi << 4) | lo;
+	}
+
+	count = raw[0] | (raw[1] << 8);
+	off = 2;
+
+	if (pos == 0) {
+		ctx->pos = 1;
+		if (!dir_emit_dots(filp, ctx)) {
+			kfree(raw);
+			return 0;
+		}
+	}
+
+	for (i = 0; i < count && off + 7 <= raw_len; i++) {
+		__u32 entry_ino;
+		__u16 name_len;
+		__u8 ftype;
+		const char *name;
+
+		entry_ino = raw[off] | (raw[off + 1] << 8) |
+			    (raw[off + 2] << 16) | (raw[off + 3] << 24);
+		name_len = raw[off + 4] | (raw[off + 5] << 8);
+		ftype = raw[off + 6];
+		off += 7;
+
+		if (off + name_len > raw_len)
+			break;
+
+		name = (const char *)(raw + off);
+		off += name_len;
+
+		if (pos > 1) {
+			pos--;
+			continue;
+		}
+
+		ctx->pos = pos + 1;
+		if (!dir_emit(ctx, name, name_len, entry_ino,
+			      ftype == 0 ? DT_UNKNOWN :
+			      ftype == 1 ? DT_DIR : DT_REG)) {
+			kfree(raw);
+			return 0;
+		}
+		pos++;
+	}
+
+	kfree(raw);
+	return 0;
+}
+
+/* ===========================================================================
+ * Address space operations
+ * =========================================================================== */
+
+static int sagefs_readpage(struct file *file, struct folio *folio)
+{
+	struct inode *inode = folio->mapping->host;
+	struct sagefs_inode_info *ei = container_of(inode, struct sagefs_inode_info, vfs_inode);
+	size_t avail;
+
+	avail = ei->inline_len - folio->index * PAGE_SIZE;
+	if (avail <= 0) {
+		set_page_dirty(&folio->page);
+		unlock_page(&folio->page);
+		return 0;
+	}
+
+	if (avail > PAGE_SIZE)
+		avail = PAGE_SIZE;
+
+	memcpy(folio_address(folio), ei->inline_data + folio->index * PAGE_SIZE, avail);
+	memset(folio_address(folio) + avail, 0, PAGE_SIZE - avail);
+	set_page_dirty(&folio->page);
+	unlock_page(&folio->page);
+	return 0;
+}
+
+/* ===========================================================================
+ * Persistence (write inode entries back to block device)
+ * =========================================================================== */
+
+static int sagefs_persist_inode(struct inode *inode)
+{
+	struct sagefs_sb_info *sbi = inode->i_sb->s_fs_info;
+	struct sagefs_inode_info *ei = container_of(inode, struct sagefs_inode_info, vfs_inode);
+	__u64 area_start = sbi->inode_entry_start_blk * sbi->block_size;
+	__u64 area_end = area_start + sbi->inode_entry_byte_size;
+	__u64 off;
+	int found = 0;
+
+	/* Search for existing entry for this inode */
+	for (off = area_start; off + 16 <= area_end; ) {
+		struct buffer_head *bh;
+		__u32 ino, mode_val;
+		__u16 name_len, data_len;
+		__u64 blk = off >> SAGEFS_BLOCK_BITS;
+		__u64 blk_off = off & (SAGEFS_BLOCK_SIZE - 1);
+
+		if (blk_off + 16 > SAGEFS_BLOCK_SIZE)
+			break;
+
+		bh = sb_bread(inode->i_sb, blk);
+		if (!bh)
+			break;
+
+		ino = le32_to_cpu(*(__le32 *)(bh->b_data + blk_off));
+		mode_val = le32_to_cpu(*(__le32 *)(bh->b_data + blk_off + 4));
+		name_len = le16_to_cpu(*(__le16 *)(bh->b_data + blk_off + 12));
+		data_len = le16_to_cpu(*(__le16 *)(bh->b_data + blk_off + 14));
+
+		if (ino == 0 && mode_val == 0 && name_len == 0 && data_len == 0)
+			break;
+
+		if (ino == ei->ino) {
+			/* Update existing entry */
+			*(__le32 *)(bh->b_data + blk_off + 4) = cpu_to_le32(ei->mode);
+			*(__le32 *)(bh->b_data + blk_off + 8) = cpu_to_le32(ei->size);
+			if (ei->inline_len > 0 && ei->inline_len <= SAGEFS_MAX_INLINE_DATA) {
+				*(__le16 *)(bh->b_data + blk_off + 14) = cpu_to_le16(ei->inline_len);
+				memcpy(bh->b_data + blk_off + 16 + name_len,
+				       ei->inline_data, ei->inline_len);
+			}
+			mark_buffer_dirty(bh);
+			brelse(bh);
+			found = 1;
+			break;
+		}
+
+		brelse(bh);
+		off += 16 + name_len + data_len;
+	}
+
+	if (!found) {
+		/* Find empty slot and write new entry */
+		for (off = area_start; off + 16 <= area_end; ) {
+			struct buffer_head *bh;
+			__u32 ino, mode_val;
+			__u16 name_len, data_len;
+			__u64 blk = off >> SAGEFS_BLOCK_BITS;
+			__u64 blk_off = off & (SAGEFS_BLOCK_SIZE - 1);
+
+			if (blk_off + 16 > SAGEFS_BLOCK_SIZE)
+				break;
+
+			bh = sb_bread(inode->i_sb, blk);
+			if (!bh)
+				break;
+
+			ino = le32_to_cpu(*(__le32 *)(bh->b_data + blk_off));
+			mode_val = le32_to_cpu(*(__le32 *)(bh->b_data + blk_off + 4));
+			name_len = le16_to_cpu(*(__le16 *)(bh->b_data + blk_off + 12));
+			data_len = le16_to_cpu(*(__le16 *)(bh->b_data + blk_off + 14));
+
+			if (ino == 0 && mode_val == 0 && name_len == 0 && data_len == 0) {
+				/* Write new entry at this empty slot */
+				*(__le32 *)(bh->b_data + blk_off) = cpu_to_le32(ei->ino);
+				*(__le32 *)(bh->b_data + blk_off + 4) = cpu_to_le32(ei->mode);
+				*(__le32 *)(bh->b_data + blk_off + 8) = cpu_to_le32(ei->size);
+				*(__le16 *)(bh->b_data + blk_off + 12) = cpu_to_le16(0); /* name_len */
+				*(__le16 *)(bh->b_data + blk_off + 14) = cpu_to_le16(ei->inline_len);
+				if (ei->inline_len > 0)
+					memcpy(bh->b_data + blk_off + 16,
+					       ei->inline_data, ei->inline_len);
+				mark_buffer_dirty(bh);
+				brelse(bh);
+				break;
+			}
+
+			brelse(bh);
+			off += 16 + name_len + data_len;
+		}
+	}
+
+	inode_set_ctime(inode, 0, 0);
+	return 0;
+}
+
+static int sagefs_fill_super(struct super_block *sb, struct fs_context *fc)
+{
+	struct sagefs_sb_info *sbi;
+	struct inode *root_inode;
+
+	printk(KERN_DEBUG "sagefs: fill_super enter (minimal test)\n");
+
+	sbi = kzalloc(sizeof(struct sagefs_sb_info), GFP_KERNEL);
+	if (!sbi)
+		return -ENOMEM;
+
+	sbi->block_size = SAGEFS_BLOCK_SIZE;
+	sbi->inode_entry_start_blk = SAGEFS_INODE_ENTRY_START_BLK;
+	sbi->inode_entry_byte_size = SAGEFS_INODE_ENTRY_BYTE_SIZE;
+
+	sb->s_fs_info = sbi;
+	sb->s_magic = SAGEFS_MAGIC;
+	sb->s_op = &sagefs_super_ops;
+	sb->s_time_gran = 1;
+
+	root_inode = sagefs_iget(sb, SAGEFS_ROOT_INO);
+	if (IS_ERR(root_inode)) {
+		printk(KERN_ERR "sagefs: iget failed %ld\n", PTR_ERR(root_inode));
+		kfree(sbi);
+		sb->s_fs_info = NULL;
+		return PTR_ERR(root_inode);
+	}
+
+	root_inode->i_mode = S_IFDIR | 0555;
+	root_inode->i_size = 0;
+	root_inode->i_blocks = 0;
+	set_nlink(root_inode, 2);
+	root_inode->i_op = &sagefs_dir_inode_ops;
+	root_inode->i_fop = &sagefs_dir_file_ops;
+
+	sb->s_root = d_make_root(root_inode);
+	if (!sb->s_root) {
+		printk(KERN_ERR "sagefs: d_make_root failed\n");
+		iput(root_inode);
+		kfree(sbi);
+		sb->s_fs_info = NULL;
+		return -ENOMEM;
+	}
+
+	printk(KERN_DEBUG "sagefs: fill_super done (minimal)\n");
+	return 0;
+}
+
+static int sagefs_sync_fs(struct super_block *sb, int wait)
+{
+	struct sagefs_sb_info *sbi = sb->s_fs_info;
+	if (sbi->sb_bh && sbi->onsb) {
+		mark_buffer_dirty(sbi->sb_bh);
+		sync_dirty_buffer(sbi->sb_bh);
+	}
+	return 0;
+}
+
+/* ===========================================================================
+ * Superblock operations table
+ * =========================================================================== */
+
+static struct super_operations sagefs_super_ops = {
+	.alloc_inode = sagefs_alloc_inode,
+	.destroy_inode = sagefs_destroy_inode,
+	.write_inode = sagefs_write_inode,
+	.put_super = sagefs_put_super,
+	.sync_fs = sagefs_sync_fs,
+	.statfs = sagefs_statfs,
 };
+
+static struct inode_operations sagefs_dir_inode_ops = {
+	.create = sagefs_create,
+	.lookup = sagefs_lookup,
+	.unlink = sagefs_unlink,
+	.mkdir = sagefs_mkdir,
+	.rmdir = sagefs_rmdir,
+	.rename = sagefs_rename,
+	.setattr = sagefs_setattr,
+};
+
+static struct inode_operations sagefs_file_inode_ops = {
+	.setattr = sagefs_setattr,
+	.getattr = sagefs_getattr,
+};
+
+static const struct file_operations sagefs_dir_file_ops = {
+	.owner = THIS_MODULE,
+	.iterate_shared = sagefs_readdir,
+	.llseek = default_llseek,
+};
+
+static const struct file_operations sagefs_file_file_ops = {
+	.owner = THIS_MODULE,
+	.open = sagefs_open,
+	.release = sagefs_release,
+	.read_iter = sagefs_read_iter,
+	.write_iter = sagefs_write_iter,
+	.fsync = sagefs_fsync,
+	.llseek = sagefs_llseek,
+};
+
+static const struct address_space_operations sagefs_aops = {
+	.read_folio = sagefs_readpage,
+};
+
+/* ===========================================================================
+ * File system type
+ * =========================================================================== */
+
+static const struct fs_context_operations sagefs_context_ops = {
+	.get_tree = sagefs_get_tree,
+};
+
+static int sagefs_get_tree(struct fs_context *fc)
+{
+	printk(KERN_DEBUG "sagefs: get_tree called (using nodev)\n");
+	return get_tree_nodev(fc, sagefs_fill_super);
+}
+
+static int sagefs_init_fs_context(struct fs_context *fc)
+{
+	fc->ops = &sagefs_context_ops;
+	return 0;
+}
+
+static void sagefs_kill_sb(struct super_block *sb)
+{
+	kill_block_super(sb);
+}
+
+static struct file_system_type sagefs_fs_type = {
+	.owner = THIS_MODULE,
+	.name = "sagefs",
+	.init_fs_context = sagefs_init_fs_context,
+	.kill_sb = sagefs_kill_sb,
+	.fs_flags = FS_REQUIRES_DEV,
+};
+
+/* ===========================================================================
+ * Module init/exit
+ * =========================================================================== */
 
 static int __init sagefs_init(void)
 {
-    int ret;
+	int ret;
 
-    printk(KERN_INFO "sagefs: initializing kernel driver\n");
+	printk(KERN_INFO "sagefs: initializing kernel filesystem driver\n");
 
-    ret = alloc_chrdev_region(&sagefs_dev, sagefs_minor, 1, SAGEFS_DEVICE_NAME);
-    if (ret < 0) {
-        printk(KERN_ERR "sagefs: failed to allocate char device region\n");
-        return ret;
-    }
+	sagefs_inode_cachep = kmem_cache_create("sagefs_inode_cache",
+						sizeof(struct sagefs_inode_info),
+						NULL, SLAB_HWCACHE_ALIGN | SLAB_RECLAIM_ACCOUNT);
+	if (!sagefs_inode_cachep)
+		return -ENOMEM;
 
-    sagefs_major = MAJOR(sagefs_dev);
-    sagefs_minor = MINOR(sagefs_dev);
+	ret = register_filesystem(&sagefs_fs_type);
+	if (ret) {
+		kmem_cache_destroy(sagefs_inode_cachep);
+		return ret;
+	}
 
-    cdev_init(&sagefs_cdev, &sagefs_fops);
-    sagefs_cdev.owner = THIS_MODULE;
-
-    ret = cdev_add(&sagefs_cdev, sagefs_dev, 1);
-    if (ret < 0) {
-        printk(KERN_ERR "sagefs: failed to add cdev\n");
-        unregister_chrdev_region(sagefs_dev, 1);
-        return ret;
-    }
-
-    sagefs_class = class_create(SAGEFS_CLASS_NAME);
-    if (IS_ERR(sagefs_class)) {
-        ret = PTR_ERR(sagefs_class);
-        printk(KERN_ERR "sagefs: failed to create class\n");
-        cdev_del(&sagefs_cdev);
-        unregister_chrdev_region(sagefs_dev, 1);
-        return ret;
-    }
-
-    sagefs_device = device_create(sagefs_class, NULL, sagefs_dev, NULL,
-                                       SAGEFS_DEVICE_NAME);
-    if (IS_ERR(sagefs_device)) {
-        ret = PTR_ERR(sagefs_device);
-        printk(KERN_ERR "sagefs: failed to create device\n");
-        class_destroy(sagefs_class);
-        cdev_del(&sagefs_cdev);
-        unregister_chrdev_region(sagefs_dev, 1);
-        return ret;
-    }
-
-    sagefs_kobj = kobject_create_and_add(SAGEFS_SYSFS_DIR, kernel_kobj);
-    if (!sagefs_kobj) {
-        printk(KERN_ERR "sagefs: failed to create sysfs kobj\n");
-        device_destroy(sagefs_class, sagefs_dev);
-        class_destroy(sagefs_class);
-        cdev_del(&sagefs_cdev);
-        unregister_chrdev_region(sagefs_dev, 1);
-        return -ENOMEM;
-    }
-
-    ret = sysfs_create_groups(sagefs_kobj, sagefs_groups);
-    if (ret < 0) {
-        printk(KERN_ERR "sagefs: failed to create sysfs group\n");
-        kobject_put(sagefs_kobj);
-        device_destroy(sagefs_class, sagefs_dev);
-        class_destroy(sagefs_class);
-        cdev_del(&sagefs_cdev);
-        unregister_chrdev_region(sagefs_dev, 1);
-        return ret;
-    }
-
-    printk(KERN_INFO "sagefs: kernel driver loaded (major=%d minor=%d state=%d)\n",
-           sagefs_major, sagefs_minor, sagefs_state);
-    return 0;
+	printk(KERN_INFO "sagefs: filesystem driver loaded\n");
+	return 0;
 }
 
 static void __exit sagefs_exit(void)
 {
-    sysfs_remove_groups(sagefs_kobj, sagefs_groups);
-    kobject_put(sagefs_kobj);
-    device_destroy(sagefs_class, sagefs_dev);
-    class_destroy(sagefs_class);
-    cdev_del(&sagefs_cdev);
-    unregister_chrdev_region(sagefs_dev, 1);
-    printk(KERN_INFO "sagefs: kernel driver unloaded\n");
+	unregister_filesystem(&sagefs_fs_type);
+	if (sagefs_inode_cachep)
+		kmem_cache_destroy(sagefs_inode_cachep);
+	printk(KERN_INFO "sagefs: filesystem driver unloaded\n");
 }
 
 module_init(sagefs_init);
@@ -413,5 +962,5 @@ module_exit(sagefs_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("SageFS Contributors");
-MODULE_DESCRIPTION("SageFS kernel driver — sysfs command interface + /dev/sagefs char device");
-MODULE_VERSION("0.1.0");
+MODULE_DESCRIPTION("SageFS Linux kernel filesystem driver");
+MODULE_VERSION("0.2.0");

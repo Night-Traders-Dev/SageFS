@@ -2,5 +2,12 @@ __pycache__
 *.sgvm
 *.svm
 *.c
-!src/kernel/
+!src/kernel/*.c
 bytecode
+*.ko
+*.[ao]
+*.o.cmd
+*.mod
+*.symvers
+*.order
+*.tmp
