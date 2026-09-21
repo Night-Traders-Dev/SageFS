@@ -69,7 +69,7 @@ def write_vm_wrapper(wrapper_path: Path, main_source: Path) -> None:
     src = main_source.resolve()
     script = (
         "#!/usr/bin/env bash\n"
-        f'exec sage --runtime bytecode "{src}" "$@"\n'
+        f'exec sage-c --runtime bytecode "{src}" "$@"\n'
     )
     wrapper_path.write_text(script, encoding="utf-8")
     wrapper_path.chmod(0o755)
@@ -171,7 +171,7 @@ def cmd_build(args: list[str]) -> None:
     # `sage` bytecode runtime (the only execution path that forwards CLI args
     # to sys.args()).
     native_ok = run_checked([
-        "sage", "--compile", str(SRC_DIR / "mkfs.sage"),
+        "sage-c", "--compile", str(SRC_DIR / "mkfs.sage"),
         "-o", str(BUILD_DIR / BINARY_NAME), "-O3",
     ])
     if not native_ok:
@@ -181,7 +181,7 @@ def cmd_build(args: list[str]) -> None:
         write_vm_wrapper(BUILD_DIR / BINARY_NAME, SRC_DIR / "mkfs.sage")
 
     emit_c_ok = run_checked([
-        "sage", "--emit-c", str(SRC_DIR / "vfs.sage"), "-o", str(BUILD_DIR / "sagefs_vfs.c"),
+        "sage-c", "--emit-c", str(SRC_DIR / "vfs.sage"), "-o", str(BUILD_DIR / "sagefs_vfs.c"),
     ])
     if not emit_c_ok:
         step_warn("emit-c unavailable for Bytes; skipping sagefs_vfs.c")
@@ -225,7 +225,7 @@ def cmd_test(args: list[str]) -> None:
         step(f"Running {test_file.name}")
         try:
             cmd = [
-                "sage", "--runtime", "bytecode",
+                "sage-c", "--runtime", "bytecode",
                 "-I", str(SRC_DIR),
                 str(test_file),
             ]
@@ -296,7 +296,7 @@ def cmd_all(args: list[str]) -> None:
 # ── Dependency check ──────────────────────────────────────────────────────────
 def check_dependencies() -> None:
     section("Dependencies")
-    required = ["sage", "sagevm"]
+    required = ["sage-c", "sagevm"]
     missing = []
     for dep in required:
         step(f"checking {dep}")
