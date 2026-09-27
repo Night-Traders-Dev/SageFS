@@ -198,10 +198,19 @@ class Journal:
         ## Bytes currently staged in the log tail.
         return bytes_len(self.buffer)
 
+    proc enabled(self) -> Bool:
+        ## A journal with no reserved region is disabled rather than broken.
+        ## Volumes written before format v1.3 have no journal region at all, and
+        ## pointing one at arbitrary blocks is how the superblock used to get
+        ## overwritten. Losing crash recovery is the acceptable trade.
+        return self.block_count > 0
+
     proc sync(self):
         ## Flush the staged buffer to the journal region, block by block.
         ## The buffer is zero-padded up to a block boundary.  Raises if the
         ## log would overflow its reserved region (caller must checkpoint).
+        if not self.enabled():
+            return
         let total: Int = bytes_len(self.buffer)
         if total > self.capacity_bytes():
             raise "journal overflow: checkpoint required before further writes"

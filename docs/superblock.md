@@ -26,7 +26,7 @@ Two superblock copies (primary at offset 0, mirror at offset 4096) allow recover
 | Constant | Value | Meaning |
 |----------|-------|---------|
 | `SAGEFS_MAGIC` | `0x53414745` | "SAGE" magic number |
-| `SAGEFS_VERSION_MAJOR` / `MINOR` | `1` / `2` | On-disk format version. v1.1 added `image_size`; v1.2 added `inode_entry_start_blk` and `inode_entry_byte_size`, and moved the checksum to 448. |
+| `SAGEFS_VERSION_MAJOR` / `MINOR` | `1` / `3` | On-disk format version. v1.1 added `image_size`; v1.2 added `inode_entry_start_blk` and `inode_entry_byte_size` and moved the checksum to 448; v1.3 added `journal_start_blk` / `journal_block_count` and moved it to 460. |
 | `DEFAULT_BLOCK_SIZE` | `4096` | Block size (bytes) |
 | `DEFAULT_SEGMENT_SIZE` | `512` | Segment size (blocks) = 2 MiB |
 | `MAX_LABEL_LEN` | `256` | Volume label max (UTF-8 bytes) |
@@ -87,9 +87,24 @@ Manages the dual-pack atomic commit protocol.
 
 ## Design Notes
 
-- The on-disk byte offsets for every field are documented inline in `serialize()` (e.g. `checksum_algo` at byte 388, `checksum` at byte 448 — it was 424 before v1.2).
+- The on-disk byte offsets for every field are documented inline in `serialize()` (e.g. `checksum_algo` at byte 388, `checksum` at byte 460 — 448 in v1.2, 424 before that).
 - The current `compute_checksum()` uses the FNV-1a `hash()` builtin as a placeholder; Phase 3 will migrate it to `checksum.sage`'s `checksum_block()` so the superblock uses the same CRC32C/xxHash/SHA-256 pipeline as data blocks.
 
 ## Related
 
 [checksum.md](checksum.md) · [nat.md](nat.md) · [segment.md](segment.md)
+
+## A note on the byte offsets
+
+`write_le16` / `write_le32` / `write_le64` **append** to the buffer. The offset
+comments in `serialize()` are therefore only truthful when nothing is skipped
+between fields. Inserting a field with a nominal offset that leaves a gap does
+not fail loudly: the buffer just comes out shorter than the comment claims, and
+`deserialize()` — which reads at absolute offsets — then reads every later field
+misaligned. Adding the v1.3 journal fields at nominal 452 did exactly this and
+shifted the checksum; the symptom was a superblock whose `nat_start_blk` read
+back as nonsense. The new fields are packed immediately after
+`inode_entry_byte_size` for that reason.
+
+The header is 464 bytes. When adding a field, either pack it or pad explicitly,
+and check `bytes_len(sb.serialize())` against `SUPERBLOCK_HEADER_SIZE`.

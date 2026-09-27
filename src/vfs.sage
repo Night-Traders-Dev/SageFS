@@ -250,7 +250,16 @@ class VFS:
             self.cache = cache_module.CacheManager(1024, 1024, 512)
 
         if self.journal == nil:
-            self.journal = Journal(self, 0, 16, bs)
+            ## Use the region the layout reserved, not blocks 0-15. Those are the
+            ## superblock, its mirror, both checkpoint packs and the whole
+            ## inode-entry area, and Journal.sync() rewrites its buffer from
+            ## start_blk -- so every commit after a non-inline write stamped the
+            ## journal's magic over the superblock. It went unnoticed because
+            ## unmount() re-serialises the superblock afterwards; a crash in
+            ## between left an unreadable volume. A volume with no reserved
+            ## region (written before format v1.3) gets a disabled journal.
+            self.journal = Journal(self, self.sb.journal_start_blk,
+                                   self.sb.journal_block_count, bs)
 
         if self.txmgr == nil:
             self.txmgr = txn_module.TransactionManager(self.journal, self)

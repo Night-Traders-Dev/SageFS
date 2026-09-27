@@ -35,8 +35,11 @@ import sys
 let SAGEFS_MAGIC: Int = 0x53414745
 
 ## On-disk format version
+##   v1.1 added image_size; v1.2 added inode_entry_start_blk /
+##   inode_entry_byte_size and moved the checksum to 448; v1.3 added
+##   journal_start_blk / journal_block_count and moved the checksum to 464.
 let SAGEFS_VERSION_MAJOR: Int = 1
-let SAGEFS_VERSION_MINOR: Int = 2
+let SAGEFS_VERSION_MINOR: Int = 3
 
 ## Default block size in bytes (must be power-of-two, >= 4096)
 let DEFAULT_BLOCK_SIZE: Int = 4096
@@ -44,8 +47,9 @@ let DEFAULT_BLOCK_SIZE: Int = 4096
 ## Default segment size in blocks (each segment = 512 * 4096 = 2 MiB)
 let DEFAULT_SEGMENT_SIZE: Int = 512
 
-## Number of bytes needed to read the superblock header (including image_size and inode area fields)
-let SUPERBLOCK_HEADER_SIZE: Int = 452
+## Number of bytes needed to read the superblock header (including image_size,
+## inode area and journal region fields)
+let SUPERBLOCK_HEADER_SIZE: Int = 464
 
 ## Byte offsets of the two superblock copies
 let SUPERBLOCK_OFFSET: Int = 0
@@ -233,6 +237,9 @@ let RESERVED_BLKS: Int = 16
 ## Number of blocks reserved for inode entries (after superblocks/checkpoint packs)
 let INODE_ENTRY_RESERVED_BLKS: Int = 8
 
+## Blocks reserved for the write-ahead journal (format v1.3+).
+let JOURNAL_RESERVED_BLKS: Int = 32
+
 # Layout computation
 # ===========================================================================
 
@@ -254,7 +261,20 @@ proc compute_layout(total_blocks: Int, block_size: Int, segment_size: Int) -> Di
     ## Number of segments in the entire volume (round down)
     let total_segments: Int = int(total_blocks / segment_size)
 
-    ## Reserve first 16 blocks for superblocks, checkpoint packs, and inode entry area
+    ## Reserve the first 16 blocks for superblocks, checkpoint packs and the inode
+    ## entry area, then a journal region.
+    ##
+    ## The journal region is new in v1.3. Previously nothing was reserved for it,
+    ## and VFS.mount() pointed the journal at blocks 0-15 -- the superblock, its
+    ## mirror, both checkpoint packs and the entire inode-entry area. Since
+    ## Journal.sync() rewrites the whole buffer from start_blk, the first commit
+    ## after a non-inline write stamped the journal's magic over the superblock.
+    ## It went unnoticed because unmount() re-serialises the superblock
+    ## afterwards, so a crash in between left an unreadable volume.
+    ##
+    ## Sizing is a fixed number of blocks rather than a proportion: the journal
+    ## holds whole block images, so its useful size is a multiple of the block
+    ## size anyway, and a fixed region keeps the layout reproducible.
 
     ## ------------------------------------------------------------------
     ## SIT: one bit per segment (valid/invalid) plus per-segment metadata.
@@ -308,7 +328,11 @@ proc compute_layout(total_blocks: Int, block_size: Int, segment_size: Int) -> Di
     ## ------------------------------------------------------------------
     ## Assign starting block offsets
     ## ------------------------------------------------------------------
-    let nat_start: Int = RESERVED_BLKS
+    let journal_start: Int = RESERVED_BLKS
+    let journal_blocks: Int = JOURNAL_RESERVED_BLKS
+    if journal_blocks > total_blocks / 2:
+        journal_blocks = int(total_blocks / 2)
+    let nat_start: Int = journal_start + journal_blocks
     let sit_start: Int = nat_start + nat_segments * segment_size
     let ssa_start: Int = sit_start + sit_segments * segment_size
     let main_start: Int = ssa_start + ssa_segments * segment_size
@@ -322,6 +346,8 @@ proc compute_layout(total_blocks: Int, block_size: Int, segment_size: Int) -> Di
     layout["sit_segments"] = sit_segments
     layout["inode_entry_start_blk"] = 8
     layout["inode_entry_byte_size"] = INODE_ENTRY_RESERVED_BLKS * block_size
+    layout["journal_start"] = journal_start
+    layout["journal_blocks"] = journal_blocks
     return layout
 
 # ===========================================================================
@@ -385,6 +411,8 @@ class SageFSSuperblock:
         self.image_size = 0          # total bytes of the image buffer (block device hint)
         self.inode_entry_start_blk = 0  # block offset for reserved inode entry area
         self.inode_entry_byte_size = 0  # size of inode entry area in bytes
+        self.journal_start_blk = 0      # block offset for the journal region
+        self.journal_block_count = 0    # blocks reserved for the journal; 0 = disabled
 
         # -- integrity --
         self.checksum = 0
@@ -581,8 +609,15 @@ class SageFSSuperblock:
         write_le64(buf, self.inode_entry_start_blk)  # 432
         write_le64(buf, self.inode_entry_byte_size)  # 440
 
+        # -- journal region (v1.3+) --
+        # These offsets follow on directly: write_le64/write_le32 append, so a
+        # gap here would silently shift every later field against the absolute
+        # offsets deserialize() reads.
+        write_le64(buf, self.journal_start_blk)   # 448
+        write_le32(buf, self.journal_block_count) # 456
+
         # -- integrity checksum (must be last) --
-        write_le32(buf, self.checksum)        # 448
+        write_le32(buf, self.checksum)        # 460
 
         return buf
 
@@ -621,6 +656,8 @@ class SageFSSuperblock:
         d["state"] = self.state
         d["image_size"] = self.image_size
         d["inode_entry_start_blk"] = self.inode_entry_start_blk
+        d["journal_start_blk"] = self.journal_start_blk
+        d["journal_block_count"] = self.journal_block_count
         d["inode_entry_byte_size"] = self.inode_entry_byte_size
         d["checksum"] = self.checksum
         return d
@@ -653,6 +690,8 @@ class SageFSSuperblock:
         s = s + "  state:           " + str(self.state) + "\n"
         s = s + "  image_size:      " + str(self.image_size) + " bytes\n"
         s = s + "  inode_entry_blk: " + str(self.inode_entry_start_blk) + "\n"
+        s = s + "  journal: blk " + str(self.journal_start_blk) + " +"
+        s = s + str(self.journal_block_count) + " blocks\n"
         s = s + "  inode_entry_size:" + str(self.inode_entry_byte_size) + " bytes\n"
         s = s + "  checksum:        0x" + str(self.checksum) + "\n"
         return s
@@ -698,7 +737,21 @@ proc deserialize_superblock(buf: Bytes) -> SageFSSuperblock:
         sb.inode_entry_start_blk = 0
         sb.inode_entry_byte_size = 0
 
-    if sb.version_minor >= 2:
+    ## v1.3+ fields (journal region at 452/460).
+    ## An image written before v1.3 has no reserved journal region at all, so the
+    ## journal is disabled (count 0) rather than pointed at whatever is in the
+    ## way. Losing crash recovery on old volumes is much better than corrupting
+    ## them.
+    if sb.version_minor >= 3 and bytes_len(buf) >= 464:
+        sb.journal_start_blk = read_le64(buf, 448)
+        sb.journal_block_count = read_le32(buf, 456)
+    else:
+        sb.journal_start_blk = 0
+        sb.journal_block_count = 0
+
+    if sb.version_minor >= 3:
+        sb.checksum = read_le32(buf, 460)
+    elif sb.version_minor >= 2:
         sb.checksum = read_le32(buf, 448)
     elif sb.version_minor >= 1:
         sb.checksum = read_le32(buf, 432)
@@ -1155,6 +1208,8 @@ proc create_superblock(total_blocks: Int, label: String, block_size: Int, segmen
     sb.main_start_blk = layout["main_start"]
     sb.inode_entry_start_blk = layout["inode_entry_start_blk"]
     sb.inode_entry_byte_size = layout["inode_entry_byte_size"]
+    sb.journal_start_blk = layout["journal_start"]
+    sb.journal_block_count = layout["journal_blocks"]
 
     sb.uuid = generate_uuid()
     sb.label = safe_label

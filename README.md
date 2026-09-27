@@ -39,7 +39,7 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 18/18 files, 464 assertions passing.** The suite was previously not
+**Tests: 19/19 files, 478 assertions passing.** The suite was previously not
 running at all; see [Known issues](#known-issues) for what is still broken,
 including two entries that can lose data.
 
@@ -59,9 +59,9 @@ including two entries that can lose data.
 - ✅ **CRC32C** — real, table-driven, verified against known-answer vectors
 - ✅ **xxHash32** — real implementation
 - ✅ **Dual superblock mirroring** — primary at block 0, mirror at block 1
-- ⚠️ **Write-ahead journal** — the record format and a correct two-pass
-  recover/replay are implemented, but no reserved region is carved out for it,
-  so the journal currently overlaps the superblock. See known issues.
+- ⚠️ **Write-ahead journal** — a reserved region, the record format and a correct
+  two-pass recover/replay are implemented, but no production path ever stages an
+  `REC_UPDATE`, so the log is structurally present and semantically empty.
 - ⚠️ **Checkpoint packs** — structures and (de)serialisation exist; `mkfs` never
   writes them and nothing reads them back
 - ❌ **SHA-256** — `checksum.sage` returns the hard-coded digest of the empty
@@ -135,7 +135,7 @@ SageFS integrates Python-like readable and C-like performant SageLang to deliver
     against this implementation
   - No lock-free hot paths, no io_uring
 
-- **Development**: 18 test files, 464 assertions, 6 CLI tools
+- **Development**: 19 test files, 478 assertions, 6 CLI tools
 
 The binary image format uses little-endian encoding with 4 KiB blocks and 512
 blocks per segment. The B+ tree is the exception: its node magic and its keys
@@ -220,7 +220,7 @@ What is missing is a working session setup.
 ### Run Tests
 
 ```bash
-# Full test suite — 18 files, 464 assertions
+# Full test suite — 19 files, 478 assertions
 ./sagemake test
 
 # A single file
@@ -384,15 +384,21 @@ SageFS is written in [SageLang](https://github.com/Night-Traders-Dev/SageLang), 
 
 Ordered by severity. The first two can destroy data.
 
-**1. The journal overlaps the superblock and can brick a volume.**
-`VFS.mount()` constructs `Journal(self, 0, 16, bs)`, so the journal region is
-blocks 0-15: the primary superblock, its mirror, the checkpoint packs, and the
-entire reserved inode-entry area. `Journal.sync()` always rewrites the whole
-buffer from `start_blk`, so the first commit after a non-inline write stamps the
-journal's magic over the superblock in the in-memory image. It currently
-survives only because `unmount()` re-serialises the superblock afterwards — a
-crash in between leaves an unreadable volume. Fixing this needs a real reserved
-region carved out of `compute_layout()`.
+**1. ~~The journal overlaps the superblock and can brick a volume.~~ Fixed.**
+`VFS.mount()` used to construct `Journal(self, 0, 16, bs)` — blocks 0-15, being
+the superblock, its mirror, both checkpoint packs and the whole inode-entry
+area — because the layout never reserved a region for the journal. Since
+`Journal.sync()` rewrites its buffer from `start_blk`, any write too large to
+inline stamped the journal's magic over the superblock. It went unnoticed
+because `unmount()` re-serialises the superblock afterwards; a crash in between
+left an unreadable volume.
+
+Format v1.3 reserves `JOURNAL_RESERVED_BLKS` (32) blocks after the metadata
+area, records `journal_start_blk` / `journal_block_count` in the superblock, and
+mounts the journal there. Volumes written before v1.3 have no region and get a
+*disabled* journal rather than a dangerous one. Covered by
+`testing/test_journal_region.sage` (14 assertions), which asserts the superblock
+magic survives a non-inline write.
 
 **2. `fsgc.do_gc` discards live data.** It walks a victim segment's validity
 bitmap, increments `blocks_moved` for each valid block, and then frees the
@@ -448,7 +454,7 @@ entry points:
 | Command | What it does |
 | --- | --- |
 | `./sagemake build` | compiles the tools into `build/` |
-| `./sagemake test` | runs all 18 test files |
+| `./sagemake test` | runs all 19 test files |
 | `build/mkfs.sagefs <image> [--size MB] [--label NAME] [--block-size N] [--segment-size N] [--force]` | format an image |
 | `build/mkfs.sagefs --check <image>` | verify the magic number |
 | `sage --runtime bytecode -I src src/mount.sage <image> <mountpoint>` | mount via FUSE |
