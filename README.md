@@ -463,13 +463,25 @@ SIT 12.5% too small.
 in-memory structures that die at unmount, despite `compute_layout()` reserving
 regions for them.
 
-**12. `_persist_all()` loses an inode entry when several are written.** The
-entries that do land are framed correctly, so this is entries going missing
-rather than being misread — the writer and reader appear to disagree about
-where the next entry begins once more than one is present. In practice a third
-mount can come up missing a file's inode even though its extents are still in the
-tree. `testing/test_persistence.sage` carries a tripwire for it, so the suite
-reports one deliberate failure until it is fixed.
+**12. An inode's size can reach 0, and then `_persist_all()` drops it.**
+Reproducible from a fresh image, and *not* a framing problem — `write_inode_entry_at`
+and `read_inode_entries_from_area` agree byte for byte on the 16-byte header
+(`ino`@0, `mode`@4, `size`@8, `name_len`@12, `data_len`@14) and both step by
+`16 + name_len + data_len`. The entry is written and then never read back because
+it was never written at all: `_persist_all()` skips any inode with no inline data
+**and** `size == 0`.
+
+Tracing it: a block-mapped file is restored at mount with `size = 8192` and is
+present in the inode table, but by unmount its size is 0, so the guard skips it
+and the third mount comes up without the inode even though its extents are still
+in the tree. Something zeroes the size between mount and unmount; the candidates
+are the `O_TRUNC` branch in `VFS.open()` (which is *not* it — `O_RDONLY` is 0 and
+`O_TRUNC` is `0x0200`, so the test does not trip it) and inode re-creation
+replacing the table entry. Not yet pinned down.
+
+Two things make this survivable today and neither is good enough: the file's data
+is still reachable through the extent tree, and `testing/test_persistence.sage`
+carries a tripwire so the suite reports one deliberate failure until it is fixed.
 
 ---
 
