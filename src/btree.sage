@@ -531,22 +531,22 @@ class BTreeEngine:
 
             if not handled and left_sib != nil and left_sib.num_items > BTREE_MIN_KEYS:
                 if current.is_leaf:
-                    let mover = left_sib.items[left_sib.num_items - 1]
+                    # append_item_from copies the bytes across and rebases the
+                    # offset. A bare push() would leave data_offset pointing into
+                    # left_sib's data_area, which is not serialized with this
+                    # node, so the value read back as unrelated bytes.
+                    let last = left_sib.num_items - 1
+                    current.append_item_from(left_sib, last)
                     pop(left_sib.items)
                     left_sib.num_items = left_sib.num_items - 1
-                    push(current.items, mover)
-                    # push() put the mover at index num_items, so the shift has to
-                    # start there. Starting at num_items - 1 left the mover at the
-                    # end and swapped the last two real items instead, which put
-                    # keys out of order and dropped one at a node boundary.
-                    var kk = current.num_items
+                    # append_item_from put the newcomer last; walk it to the front.
+                    var kk = current.num_items - 1
                     while kk > 0:
                         let tmp = current.items[kk]
                         current.items[kk] = current.items[kk - 1]
                         current.items[kk - 1] = tmp
                         kk = kk - 1
-                    current.num_items = current.num_items + 1
-                    parent.pointers[child_idx].key = mover.key
+                    parent.pointers[child_idx].key = current.items[0].key
                 else:
                     let mover = left_sib.pointers[left_sib.num_items - 1]
                     pop(left_sib.pointers)
@@ -565,15 +565,15 @@ class BTreeEngine:
 
             if not handled and right_sib != nil and right_sib.num_items > BTREE_MIN_KEYS:
                 if current.is_leaf:
-                    let mover = right_sib.items[0]
+                    # Take the sibling's first item, carrying its bytes across
+                    # before the sibling's list is shifted underneath us.
+                    current.append_item_from(right_sib, 0)
                     var kk = 0
                     while kk < right_sib.num_items - 1:
                         right_sib.items[kk] = right_sib.items[kk + 1]
                         kk = kk + 1
                     pop(right_sib.items)
                     right_sib.num_items = right_sib.num_items - 1
-                    push(current.items, mover)
-                    current.num_items = current.num_items + 1
                     parent.pointers[right_idx].key = right_sib.items[0].key
                 else:
                     let mover = right_sib.pointers[0]
@@ -618,6 +618,16 @@ class BTreeEngine:
                 self.write_node(left_sib)
             if right_sib != nil:
                 self.write_node(right_sib)
+
+            # The borrow and merge branches both mutate the parent: a borrow
+            # rewrites a separator key, a merge pops a pointer outright. It has
+            # to be written back here, because it was popped off `path` above
+            # and so is no longer covered by the loop at the bottom of delete().
+            # When the tree is two levels that loop has nothing left to write,
+            # the parent kept its stale separators, and a key that had just been
+            # borrowed across was unreachable: present in a leaf, but every
+            # search descended into the wrong one.
+            self.write_node(parent)
 
             current = parent
 

@@ -142,7 +142,19 @@ proc test_split():
     check_bool("all 200 keys found after split", all_ok, true)
     let root_node = tree.read_node(tree.root_block)
     check_bool("root is internal after split", root_node.is_leaf, false)
-    check_int("root has 2 children", root_node.num_items, 2)
+    ## 200 keys against an 84-key node limit needs more than two leaves, so the
+    ## old "expect 2 children" was simply wrong. Assert the invariant that
+    ## actually matters: the root is internal, and no leaf exceeds the limit.
+    var leaves_ok = true
+    if root_node.num_items < 2:
+        leaves_ok = false
+    var li = 0
+    while li < root_node.num_items:
+        let leaf = tree.read_node(root_node.pointers[li].block_addr)
+        if not leaf.is_leaf or leaf.num_items > BTREE_MAX_KEYS:
+            leaves_ok = false
+        li = li + 1
+    check_bool("root internal and no leaf over BTREE_MAX_KEYS", leaves_ok, true)
 
 proc test_merge():
     print("Merge/rebalance on delete:")
@@ -181,8 +193,13 @@ proc test_merge():
             not_found_ok = false
         j = j + 1
     check_bool("deleted keys 85-169 not found", not_found_ok, true)
+    ## The root cannot become a leaf here: 115 keys survive the delete and a
+    ## single node holds at most BTREE_MAX_KEYS (84). What the merge should
+    ## achieve is collapsing the root's children, from 4 before the deletes to
+    ## 2 after -- that is the rebalance actually working.
     let root_node = tree.read_node(tree.root_block)
-    check_bool("root is leaf after merge/shrink", root_node.is_leaf, true)
+    check_bool("root is still internal (115 keys > BTREE_MAX_KEYS)", root_node.is_leaf, false)
+    check_int("root shrank to 2 children after merge", root_node.num_items, 2)
 
 proc test_serialization():
     print("Serialization round-trip:")
