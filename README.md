@@ -39,7 +39,7 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 19/20 files, 508 assertions. The one failure is deliberate** —
+**Tests: 19/20 files, 511 assertions. The one failure is deliberate** —
 see known issue 12. The suite was previously not
 running at all; see [Known issues](#known-issues) for what is still broken,
 including two entries that can lose data.
@@ -136,7 +136,7 @@ SageFS integrates Python-like readable and C-like performant SageLang to deliver
     against this implementation
   - No lock-free hot paths, no io_uring
 
-- **Development**: 20 test files, 508 assertions, 6 CLI tools
+- **Development**: 20 test files, 511 assertions, 6 CLI tools
 
 The binary image format uses little-endian encoding with 4 KiB blocks and 512
 blocks per segment. The B+ tree is the exception: its node magic and its keys
@@ -221,7 +221,7 @@ What is missing is a working session setup.
 ### Run Tests
 
 ```bash
-# Full test suite — 20 files, 508 assertions
+# Full test suite — 20 files, 511 assertions
 ./sagemake test
 
 # A single file
@@ -436,9 +436,15 @@ into the inode-entry slot at `area_start` regardless of which inode is the
 parent, so nested directories share the first slot. Root survives only because
 `_get_dir(ROOT_INO)` short-circuits to the in-memory `DirManager`.
 
-**5. The superblock checksum is never recomputed on unmount.** `unmount()` sets
-`image_size` without calling `update_checksum()`, so `verify_checksum()` fails on
-a cleanly unmounted volume and fsck's first check fires every time.
+**5. ~~The superblock checksum is never recomputed.~~ Fixed.** `mkfs` and
+`unmount()` both mutate fields (`image_size`, and now `extent_root_blk` /
+`extent_generation`) and then serialise without recomputing, so the stored
+checksum described the superblock as it was *before* those changes. A cleanly
+unmounted volume failed `verify_checksum()`. That was not cosmetic: fsck's first
+check is `ISSUE_SB_CHECKSUM` at `SEV_FATAL`, so every healthy volume was reported
+corrupt. Both serializers now recompute the checksum they write —
+`compute_checksum()` excludes the field itself, so doing it on every serialise is
+safe, and it means a future caller cannot reintroduce the staleness.
 
 **6. `fsck` cannot be run.** `src/fsck.sage` is a library with no `main()`.
 Its orphan and link-count checks are also vacuous, because

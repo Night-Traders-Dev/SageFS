@@ -178,6 +178,28 @@ proc main():
           matches(got3, payload), true)
     fs3.unmount()
 
+    ## The superblock checksum must describe the superblock as written.
+    ##
+    ## Both mkfs and unmount() mutate fields -- image_size, extent_root_blk,
+    ## extent_generation -- and then serialise, and neither recomputed the
+    ## checksum. So the stored value described the superblock as it was before
+    ## those changes, and verify_checksum() failed on a cleanly unmounted volume.
+    ## That matters beyond tidiness: fsck's first check is ISSUE_SB_CHECKSUM at
+    ## SEV_FATAL, so every healthy volume was reported corrupt.
+    let raw = imgio.read_image(dev)
+    let on_disk = superblock.deserialize_superblock(raw)
+    check("superblock checksum verifies after a clean unmount",
+          on_disk.verify_checksum(), true)
+    check_int("stored checksum matches a fresh computation",
+              on_disk.checksum, on_disk.compute_checksum())
+
+    ## And it must still fail when the superblock is actually damaged, or it is
+    ## not detecting anything.
+    let tampered = imgio.read_image(dev)
+    bytes_set(tampered, 24, bytes_get(tampered, 24) ^ 0xFF)   ## block_size field
+    let bad = superblock.deserialize_superblock(tampered)
+    check("tampering is detected", bad.verify_checksum(), false)
+
     print("  Results: " + str(TESTS_PASSED) + "/" + str(TESTS_RUN) + " passed")
     if TESTS_PASSED == TESTS_RUN:
         print("  ALL PERSISTENCE TESTS PASSED")

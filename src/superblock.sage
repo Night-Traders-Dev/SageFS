@@ -630,6 +630,19 @@ class SageFSSuperblock:
         write_le64(buf, self.extent_generation)   # 468
 
         # -- integrity checksum (must be last) --
+        # Recomputed here rather than relying on the caller. Both mkfs and
+        # VFS.unmount() mutate fields (image_size, and now extent_root_blk /
+        # extent_generation) and then serialise, and neither called
+        # update_checksum(), so the stored checksum described the superblock as
+        # it was *before* those changes. A cleanly unmounted volume therefore
+        # failed verify_checksum(), and since fsck's first check is
+        # ISSUE_SB_CHECKSUM at SEV_FATAL, fsck reported every healthy volume as
+        # corrupt.
+        #
+        # compute_checksum() excludes the checksum field itself, so this is safe
+        # on every serialise. Doing it here rather than at the call sites means a
+        # new caller cannot reintroduce the same staleness.
+        self.checksum = self.compute_checksum()
         write_le32(buf, self.checksum)        # 476
 
         return buf
@@ -971,6 +984,9 @@ class SageFSCheckpoint:
             i = i + 1
 
         # -- checksum (last field) --
+        # Same reasoning as SageFSSuperblock.serialize(): recompute rather than
+        # trust the caller, since compute_checksum() excludes the field itself.
+        self.checksum = self.compute_checksum()
         write_le32(buf, self.checksum)
 
         return buf
