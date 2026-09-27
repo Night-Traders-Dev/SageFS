@@ -490,6 +490,26 @@ halves were wrong. `testing/test_persistence.sage` now checks each file against
 its own contents on the third mount, and asserts that a read-only open with
 `O_TRUNC` set leaves the data intact.
 
+**13. Inode metadata is capped by a fixed 32 KiB reserved area.** Every inode's
+metadata is stored as hex text in a fixed 8-block area at block 8, and the area
+ends exactly where the journal begins (`inode_entry_start_blk` 8 +
+`INODE_ENTRY_RESERVED_BLKS` 8 == `RESERVED_BLKS` 16). Two measured limits follow:
+
+- `MAX_INLINE_DENTRIES` is 200, so a single directory holds at most 200 entries.
+  Verified: a directory listing stops growing at 3384 bytes / 258 persisted
+  inodes whether 400 or 1500 files are attempted — the extra `open()` calls
+  simply fail.
+- In principle the 32 KiB area bounds total inodes far below that, and
+  `write_inode_entry_at` does no bounds checking of its own; it grows the image
+  and writes wherever it is told. `_persist_all()` now checks the bound itself
+  and reports how many inodes did not fit rather than writing past the end.
+
+This is architectural, not a bug to patch: the inode table has to move into real
+blocks, like the extent tree already does. Until then a volume holds a few
+hundred inodes. I have **not** reproduced the area actually overflowing — the
+200-entry directory cap keeps the total well under the limit — so treat the
+bound as a guard on an invariant rather than a fix for observed corruption.
+
 ---
 
 ## Command-line tools

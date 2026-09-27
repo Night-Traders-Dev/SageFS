@@ -401,6 +401,7 @@ class VFS:
         let area_end = area_start + area_size
         self._ensure_image_size(area_end)
         var off = area_start
+        var dropped = 0
         let all_inos = self.inode.list_inodes()
         for ino in all_inos:
             let inode_obj = self.inode.get_inode(ino)
@@ -408,12 +409,35 @@ class VFS:
                 continue
             let data_str: String = inode_obj.get_inline_data()
             if len(data_str) > 0 or inode_obj.size > 0:
+                ## Never write past the reserved area.
+                ##
+                ## The area is a fixed 8 blocks and ends exactly where the journal
+                ## region begins (inode_entry_start_blk 8 + INODE_ENTRY_RESERVED_BLKS
+                ## 8 == RESERVED_BLKS 16), and write_inode_entry_at does no bounds
+                ## checking of its own -- it grows the image and writes wherever it
+                ## is told. So the write is bounded here rather than trusted.
+                ##
+                ## I have not reproduced this actually being hit, and the directory
+                ## entry cap currently keeps the total well under the limit -- so
+                ## treat this as a guard on an invariant that is one format change
+                ## away from mattering, not a fix for an observed corruption. The
+                ## real ceiling is architectural: all inode metadata is hex text in
+                ## a fixed 32 KiB area, so it cannot scale.
+                let need = 16 + len(data_str)
+                if off + need > area_end:
+                    dropped = dropped + 1
+                    continue
                 let entry_size = imgio.write_inode_entry_at(self.image_buf, off, ino, inode_obj.mode, inode_obj.size, "", data_str)
                 off = off + entry_size
         ## Zero out remaining area
         while off < area_end:
             bytes_set(self.image_buf, off, 0)
             off = off + 1
+        if dropped > 0:
+            print("SageFS: " + str(dropped) + " inode(s) did not fit in the " +
+                  str(area_size) + "-byte reserved inode area and were NOT saved. " +
+                  "Their data may still be in the extent tree, but their directory " +
+                  "entries are gone. The inode area must move into real blocks.")
 
     proc unmount(self) -> Bool:
         if not self.mounted:
@@ -534,9 +558,17 @@ class VFS:
         let hex_data: String = self._bytes_to_hex(data_bytes)
         inode_obj.set_inline_data(hex_data)
         self.inode.update_inode(ino)
-        let bs = self._init_block_size()
-        let area_start = self.sb.inode_entry_start_blk * bs
-        imgio.write_inode_entry_at(self.image_buf, area_start, ino, inode_obj.mode, inode_obj.size, "", hex_data)
+        ## No direct write to the image here.
+        ##
+        ## This used to write the entry at the fixed offset inode_entry_start_blk,
+        ## ignoring `ino`, so every directory saved over the same first slot --
+        ## and with no bounds check in write_inode_entry_at, a large listing would
+        ## have run off the end of the reserved area. It was also redundant:
+        ## set_inline_data() puts the listing on the inode, and _persist_all()
+        ## writes every inode's inline data sequentially at unmount. Nested
+        ## directories persisted correctly throughout, which is why removing the
+        ## write changes no behaviour -- the stray write was being overwritten
+        ## moments later regardless.
 
     proc split_path(self, path: String) -> Array[String]:
         var result: Array[String] = []
