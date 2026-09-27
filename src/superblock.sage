@@ -383,7 +383,14 @@ class SageFSSuperblock:
         self.free_segments = 0
 
         # -- key addresses --
-        self.root_inode = 3          # inode 3 is traditionally the root dir
+        ## Must equal inode.ROOT_INO. The VFS creates the root with
+        ## InodeManager.create_root(), which uses inode.ROOT_INO, and a remount
+        ## resolves "/" to that number. This field used to say 3 ("inode 3 is
+        ## traditionally the root dir"), which no code here honoured: fsck walks
+        ## reachability from sb.root_inode, so it started at an unrelated inode,
+        ## declared the real root and everything under it orphans, and --repair
+        ## deleted them. testing/test_root_inode.sage pins the two together.
+        self.root_inode = 1
         self.checkpoint_ver = 0
         self.nat_start_blk = 0
         self.sit_start_blk = 0
@@ -1240,7 +1247,8 @@ proc create_superblock(total_blocks: Int, label: String, block_size: Int, segmen
     if sb.free_segments < 0:
         sb.free_segments = 0
 
-    sb.root_inode = 3
+    ## Must equal inode.ROOT_INO -- see the note in the constructor.
+    sb.root_inode = 1
     sb.checkpoint_ver = 0
 
     sb.nat_start_blk = layout["nat_start"]

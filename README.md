@@ -39,7 +39,7 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 20/20 files, 518 assertions, no known failures.** The suite was
+**Tests: 21/21 files, 526 assertions, no known failures.** The suite was
 previously not running at all; see [Known issues](#known-issues) for what is
 still broken.
 
@@ -135,7 +135,7 @@ SageFS integrates Python-like readable and C-like performant SageLang to deliver
     against this implementation
   - No lock-free hot paths, no io_uring
 
-- **Development**: 20 test files, 518 assertions, 6 CLI tools
+- **Development**: 21 test files, 526 assertions, 6 CLI tools
 
 The binary image format uses little-endian encoding with 4 KiB blocks and 512
 blocks per segment. The B+ tree is the exception: its node magic and its keys
@@ -220,7 +220,7 @@ What is missing is a working session setup.
 ### Run Tests
 
 ```bash
-# Full test suite — 20 files, 518 assertions
+# Full test suite — 21 files, 526 assertions
 ./sagemake test
 
 # A single file
@@ -449,9 +449,21 @@ safe, and it means a future caller cannot reintroduce the staleness.
 Its orphan and link-count checks are also vacuous, because
 `read_dir_entries()` is a stub that always returns `[]`.
 
-**7. `ROOT_INO` disagrees across the codebase.** `inode.sage` and `vfs.sage` say
-1; `superblock.sage` and the C kernel driver say 3. `fsck.walk()` starts from 3,
-which nothing creates.
+**7. ~~`ROOT_INO` disagrees across the codebase.~~ Fixed.** Three different
+numbers: `inode.sage` used 1, `superblock.sage` recorded 3, and the C driver
+compiled in `SAGEFS_ROOT_INO 3`. Nothing in the VFS honoured the superblock
+field — `create_root()` used `inode.ROOT_INO`, and a remount resolved `/` to 1.
+
+That made `fsck` dangerous rather than merely wrong. It walks inode reachability
+from `sb.root_inode`, so it began at inode 3, found the real root unreachable,
+and reported the root and everything beneath it as orphans — which `--repair`
+deletes. Both sides now say 1, and `testing/test_root_inode.sage` asserts the
+superblock's value equals what `resolve("/")` returns, before and after a
+remount, so the two cannot drift apart again.
+
+The driver was a minimal stub that never reads the on-disk superblock, so it
+still uses the constant; the constant now matches, and a comment marks where to
+switch to the parsed field once real superblock parsing lands.
 
 **8. `_write_extents` is undefined.** It is called from `truncate()` and
 `punch_hole()` in `extent.sage` but defined nowhere, so both fail at runtime.

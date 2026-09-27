@@ -37,7 +37,13 @@
 #define SAGEFS_INODE_ENTRY_BYTE_SIZE (8 * SAGEFS_BLOCK_SIZE)
 #define SAGEFS_MAX_INLINE_DATA 8192
 #define SAGEFS_MAX_NAME_LEN 256
-#define SAGEFS_ROOT_INO 3
+/* Fallback only. The superblock's root_inode field is authoritative and is read
+ * at mount; this constant merely matches inode.ROOT_INO for volumes whose field
+ * is unset, and the two must not drift apart. It used to be 3 while the
+ * filesystem created the root at inode 1, so the driver resolved "/" to an
+ * unrelated inode.
+ */
+#define SAGEFS_ROOT_INO 1
 #define SAGEFS_README_INO 2
 
 /* On-disk superblock (v1.2, 452 bytes) */
@@ -804,6 +810,14 @@ static int sagefs_fill_super(struct super_block *sb, struct fs_context *fc)
 	sb->s_op = &sagefs_super_ops;
 	sb->s_time_gran = 1;
 
+	/* NOTE: this fill_super is a minimal stub. It does not read the on-disk
+	 * superblock yet -- block size and the inode entry area are hardcoded
+	 * above -- so it cannot honour sb->root_inode and uses the fallback
+	 * constant. That constant now matches inode.ROOT_INO, which is what the
+	 * superblock records. When the driver grows real superblock parsing, this
+	 * should switch to the parsed root_inode field so a future format change
+	 * can move the root without touching the driver.
+	 */
 	root_inode = sagefs_iget(sb, SAGEFS_ROOT_INO);
 	if (IS_ERR(root_inode)) {
 		printk(KERN_ERR "sagefs: iget failed %ld\n", PTR_ERR(root_inode));
