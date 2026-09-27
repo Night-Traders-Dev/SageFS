@@ -88,7 +88,7 @@ proc test_insert_search_single():
     tree.insert(key, data)
     let result = tree.search(key)
     check_bytes("single key search", result, bytes("hello"))
-    check_int("root_block after insert", tree.root_block != 0, 1)
+    check_bool("root_block after insert", tree.root_block != 0, true)
 
 proc test_insert_search_multi():
     print("Insert and search multiple keys:")
@@ -226,7 +226,7 @@ proc test_cow():
     let tree2 = BTreeEngine(alloc, root1_block, 2)
     tree2.insert(make_key(2), bytes("gen2"))
     let root2_block = tree2.root_block
-    check_int("root_block changed after CoW", root2_block != root1_block, 1)
+    check_bool("root_block changed after CoW", root2_block != root1_block, true)
     let root2_node = tree2.read_node(root2_block)
     check_int("new root generation = 2", root2_node.generation, 2)
 

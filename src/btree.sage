@@ -209,6 +209,26 @@ class BTreeNode:
                 bytes_push(new_data, bytes_get(self.data_area, old_off + j))
         self.data_area = new_data
 
+    ## Append other.items[index] to this node, carrying its bytes across from
+    ## other's data_area and rebasing the offset.
+    ##
+    ## A plain push() is wrong here: the item's data_offset would still point
+    ## into the *other* node's buffer, and only this node's data_area is ever
+    ## serialized, so the value would read back empty. That is how a merge could
+    ## drop keys that were still present in the tree.
+    proc append_item_from(self, other, index: Int):
+        if not self.is_leaf:
+            let src_ptr = other.pointers[index]
+            push(self.pointers, src_ptr)
+            self.num_items = self.num_items + 1
+            return
+        let src = other.items[index]
+        let rebased = bytes_len(self.data_area)
+        for j in range(src.data_size):
+            bytes_push(self.data_area, bytes_get(other.data_area, src.data_offset + j))
+        push(self.items, BTreeItem(src.key, rebased, src.data_size))
+        self.num_items = self.num_items + 1
+
     proc search(self, key) -> Int:
         var low: Int = 0
         var high: Int = self.num_items - 1
@@ -515,7 +535,11 @@ class BTreeEngine:
                     pop(left_sib.items)
                     left_sib.num_items = left_sib.num_items - 1
                     push(current.items, mover)
-                    var kk = current.num_items - 1
+                    # push() put the mover at index num_items, so the shift has to
+                    # start there. Starting at num_items - 1 left the mover at the
+                    # end and swapped the last two real items instead, which put
+                    # keys out of order and dropped one at a node boundary.
+                    var kk = current.num_items
                     while kk > 0:
                         let tmp = current.items[kk]
                         current.items[kk] = current.items[kk - 1]
@@ -528,7 +552,8 @@ class BTreeEngine:
                     pop(left_sib.pointers)
                     left_sib.num_items = left_sib.num_items - 1
                     push(current.pointers, mover)
-                    var kk = current.num_items - 1
+                    # Same off-by-one as the leaf case above.
+                    var kk = current.num_items
                     while kk > 0:
                         let tmp = current.pointers[kk]
                         current.pointers[kk] = current.pointers[kk - 1]
@@ -565,9 +590,10 @@ class BTreeEngine:
 
             if not handled:
                 if left_sib != nil:
-                    for item in current.items:
-                        push(left_sib.items, item)
-                    left_sib.num_items = left_sib.num_items + current.num_items
+                    var m = 0
+                    while m < current.num_items:
+                        left_sib.append_item_from(current, m)
+                        m = m + 1
                     var kk = child_idx
                     while kk < parent.num_items - 1:
                         parent.pointers[kk] = parent.pointers[kk + 1]
@@ -576,9 +602,10 @@ class BTreeEngine:
                     parent.num_items = parent.num_items - 1
                     current = left_sib
                 else:
-                    for item in right_sib.items:
-                        push(current.items, item)
-                    current.num_items = current.num_items + right_sib.num_items
+                    var m = 0
+                    while m < right_sib.num_items:
+                        current.append_item_from(right_sib, m)
+                        m = m + 1
                     var kk = right_idx
                     while kk < parent.num_items - 1:
                         parent.pointers[kk] = parent.pointers[kk + 1]
