@@ -81,11 +81,24 @@ proc test_do_gc():
 
     let orig_free = sm.free_segment_count()
 
+    ## do_gc must REFUSE here. The segment holds two live blocks, and there is no
+    ## block -> owner index that would let it relocate them: NodeAddressTable
+    ## can resolve a nid to a block and update one, but not the reverse, and the
+    ## extent tree that actually locates file data is not persisted. The old
+    ## implementation freed the segment anyway, incrementing `blocks_moved` for
+    ## data it had not moved anywhere -- i.e. it deleted the data and reported
+    ## success. Refusing is the correct behaviour until relocation exists.
     let result = collector.do_gc(segno)
-    check_bool("gc succeeded", result, true)
-    check_int("segments_freed", collector.segments_freed, 1)
-    check_int("blocks_moved", collector.blocks_moved, 2)
-    check_int("free count inc", sm.free_segment_count(), orig_free + 1)
+    check_bool("gc refuses a segment with live blocks", result, false)
+    check_int("segments_freed unchanged", collector.segments_freed, 0)
+    check_int("blocks_moved stays 0 (nothing was moved)", collector.blocks_moved, 0)
+    check_int("segments_refused counted", collector.segments_refused, 1)
+    check_int("free count unchanged", sm.free_segment_count(), orig_free)
+
+    ## The data must still be there afterwards.
+    let after = sm.get_entry(segno)
+    check_int("live blocks survive the gc attempt", after.valid_blocks, 2)
+    check_int("count_live_blocks agrees", collector.count_live_blocks(segno), 2)
 
     let result2 = collector.do_gc(-1)
     check_bool("neg segno", result2, false)
@@ -119,6 +132,22 @@ proc test_needs_urgent_gc():
     let urgent = collector.needs_urgent_gc()
     check_bool("no urgent gc @ 100% free", urgent, false)
 
+proc test_gc_reclaims_empty_segment():
+    ## The safe case: a segment with no live blocks can be freed, because there
+    ## is nothing to lose.
+    let sm = segment.SegmentManager(100, 4096, 1000)
+    let collector = gc_module.GarbageCollector(sm, nil)
+
+    sm.allocate_segment("data_warm")
+    let segno = sm.current_segments["data_warm"]
+    check_int("no live blocks yet", collector.count_live_blocks(segno), 0)
+
+    let orig_free = sm.free_segment_count()
+    let result = collector.do_gc(segno)
+    check_bool("gc reclaims an empty segment", result, true)
+    check_int("segments_freed incremented", collector.segments_freed, 1)
+    check_int("free count incremented", sm.free_segment_count(), orig_free + 1)
+
 proc test_get_stats():
     let sm = segment.SegmentManager(100, 4096, 1000)
     let collector = gc_module.GarbageCollector(sm, nil)
@@ -146,6 +175,8 @@ proc main():
     test_run_background()
     test_needs_gc()
     test_needs_urgent_gc()
+    test_gc_reclaims_empty_segment()
+
     test_get_stats()
     test_select_victim_unknown_policy()
     print("")

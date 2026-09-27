@@ -39,7 +39,7 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 19/19 files, 478 assertions passing.** The suite was previously not
+**Tests: 19/19 files, 485 assertions passing.** The suite was previously not
 running at all; see [Known issues](#known-issues) for what is still broken,
 including two entries that can lose data.
 
@@ -135,7 +135,7 @@ SageFS integrates Python-like readable and C-like performant SageLang to deliver
     against this implementation
   - No lock-free hot paths, no io_uring
 
-- **Development**: 19 test files, 478 assertions, 6 CLI tools
+- **Development**: 19 test files, 485 assertions, 6 CLI tools
 
 The binary image format uses little-endian encoding with 4 KiB blocks and 512
 blocks per segment. The B+ tree is the exception: its node magic and its keys
@@ -220,7 +220,7 @@ What is missing is a working session setup.
 ### Run Tests
 
 ```bash
-# Full test suite — 19 files, 478 assertions
+# Full test suite — 19 files, 485 assertions
 ./sagemake test
 
 # A single file
@@ -400,11 +400,13 @@ mounts the journal there. Volumes written before v1.3 have no region and get a
 `testing/test_journal_region.sage` (14 assertions), which asserts the superblock
 magic survives a non-inline write.
 
-**2. `fsgc.do_gc` discards live data.** It walks a victim segment's validity
-bitmap, increments `blocks_moved` for each valid block, and then frees the
-segment — without relocating anything. Any live data in it is gone.
-`docs/gc.md` states the opposite. This is currently latent only because nothing
-calls `run_foreground()`/`run_background()`.
+**2. ~~`fsgc.do_gc` discards live data.~~ Made safe; relocation still missing.**
+It used to walk a victim segment's validity bitmap, increment `blocks_moved` for
+each valid block, and then free the segment without relocating anything — so
+every live block in it was deleted while being reported as "moved". `do_gc` now
+counts the live blocks and refuses, leaving the segment untouched. Relocating
+them needs a block -> owner index that does not exist, so this is a guard rather
+than a fix; `needs_gc()` can still report true while nothing is reclaimable.
 
 **3. The extent map does not survive a remount.** `VFS.mount()` builds the tree
 as `BTreeEngine(self, 0, 1)` — root block 0, i.e. permanently "empty" — so after
