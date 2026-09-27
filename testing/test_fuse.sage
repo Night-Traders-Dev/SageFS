@@ -1,6 +1,7 @@
 ## test_fuse.sage — FUSE protocol unit tests (no FFI required)
 ## Tests request parsing, response building, and handler logic
 
+import sys
 import fuse
 import vfs
 import superblock
@@ -372,7 +373,10 @@ proc test_dispatch_lookup_root():
         print "  FAIL test_dispatch_lookup_root: make_vfs"
         return false
     let args = {}
-    args["ino"] = fuse.FUSE_ROOT_ID
+    ## dispatch reads args["parent"] for FUSE_LOOKUP, not args["ino"]; setting
+    ## "ino" left parent nil, and the failure surfaced as an unrelated
+    ## "dict comparison number" from the `result < 0` guard.
+    args["parent"] = fuse.FUSE_ROOT_ID
     args["name"] = "/"
     let result = fuse.dispatch(fs, fuse.FUSE_LOOKUP, args)
     if result == nil or result < 0:
@@ -448,6 +452,6 @@ proc run_tests() -> Bool:
 
 let result = run_tests()
 if result:
-    exit(0)
+    sys.exit(0)
 else:
-    exit(1)
+    sys.exit(1)

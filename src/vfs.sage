@@ -281,8 +281,16 @@ class VFS:
         ## Parse inode entries from the reserved block area
         let area_start = self.sb.inode_entry_start_blk * bs
         let area_size = self.sb.inode_entry_byte_size
+        ## Grow the image so the reserved area is actually present before reading
+        ## it. mkfs pads the image out to image_size, but a caller can hand us a
+        ## bare superblock, and the area then starts past the end of the buffer.
+        ## bytes_get() answers an out-of-range index with nil rather than
+        ## failing, so that surfaced much later as "number + nil" from inside
+        ## read_inode_entries_from_area() with nothing pointing at the real
+        ## cause. A short image should read as an empty reserved area.
+        self._ensure_image_size(area_start + area_size)
         if area_size > 0:
-            let legacy_entries = imgio.read_inode_entries_from_area(raw, area_start, area_size)
+            let legacy_entries = imgio.read_inode_entries_from_area(self.image_buf, area_start, area_size)
 
             var i = 0
             while i < len(legacy_entries):
