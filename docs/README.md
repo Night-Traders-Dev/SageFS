@@ -22,7 +22,7 @@ This directory contains per-component design and API documentation for SageFS. E
 | [dedup.md](dedup.md) | `src/dedup.sage` | 4 | ✅ Implemented |
 | [encrypt.md](encrypt.md) | `src/encrypt.sage` | 4 | ✅ Implemented |
 | [xattr.md](xattr.md) | `src/xattr.sage` | 4 | ✅ Implemented |
-| [gc.md](gc.md) | `src/gc.sage` | 5 | ✅ Implemented |
+| [gc.md](gc.md) | `src/fsgc.sage` | 5 | ✅ Implemented |
 | [cache.md](cache.md) | `src/cache.sage` | 5 | ✅ Implemented |
 | [aio.md](aio.md) | `src/aio.sage` | 5 | ✅ Implemented |
 | [raid.md](raid.md) | `src/raid.sage` | 6 | ✅ Implemented |

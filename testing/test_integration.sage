@@ -51,7 +51,44 @@ proc format_image(dev: String, label: String) -> Bool:
     readme = readme + "This is a test image for integration testing.\n"
 
     let S_IFREG: Int = 0x8000
-    imgio.write_inode_entry(buf, 2, S_IFREG | 0x1A4, len(readme), "README.txt", readme)
+
+    ## Place the entry in the reserved inode-entry area, the way src/mkfs.sage
+    ## does, rather than appending it after the superblock.
+    ##
+    ## imgio.write_inode_entry() *appends* to the end of buf, so the entry landed
+    ## at ~468 while VFS.mount() reads the area at inode_entry_start_blk *
+    ## block_size (8 * 4096 = 32768). The mount then read past the end of a
+    ## 583-byte image, and bytes_get() returning nil for an out-of-range index
+    ## turned into "Operands must be numbers or strings (number + nil)" inside
+    ## imgio.read_inode_entries_from_area(). So this test never exercised a
+    ## correctly formatted image at all -- it failed at mount for a reason that
+    ## had nothing to do with what it meant to test.
+    let bs: Int = sb.block_size
+    let inode_area_offset: Int = sb.inode_entry_start_blk * bs
+    var pad = bytes_len(buf)
+    while pad < inode_area_offset + 200:
+        bytes_push(buf, 0)
+        pad = pad + 1
+    imgio.write_inode_entry_at(buf, inode_area_offset, 2, S_IFREG | 0x1A4,
+                               len(readme), "README.txt", readme)
+
+    ## Pad out to image_size so the reserved area is really present on disk.
+    let min_image_size: Int = sb.inode_entry_start_blk * sb.block_size + sb.inode_entry_byte_size
+    if bytes_len(buf) > min_image_size:
+        sb.image_size = bytes_len(buf)
+    else:
+        sb.image_size = min_image_size
+    var j = bytes_len(buf)
+    while j < sb.image_size:
+        bytes_push(buf, 0)
+        j = j + 1
+
+    ## Re-serialise so the superblock records the final image_size.
+    let sb_bytes = sb.serialize()
+    var k = 0
+    while k < bytes_len(sb_bytes):
+        buf[k] = sb_bytes[k]
+        k = k + 1
 
     return imgio.write_image(dev, buf)
 

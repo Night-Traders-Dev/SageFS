@@ -1,5 +1,5 @@
 # Garbage Collector
-**Module:** [`src/gc.sage`](../src/gc.sage) · **Phase:** 5 (Performance) · **Status:** ✅ Implemented
+**Module:** [`src/fsgc.sage`](../src/fsgc.sage) · **Phase:** 5 (Performance) · **Status:** ✅ Implemented
 
 ## Purpose
 Maintains free segment availability in SageFS's log-structured layout.

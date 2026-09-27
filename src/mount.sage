@@ -30,7 +30,7 @@ import aio as aio_module
 import cache as cache_module
 import journal as journal_module
 import transaction as txn_module
-import gc as gc_module
+import fsgc as gc_module
 import snapshot as snap_module
 import compress as compress_module
 import dedup as dedup_module

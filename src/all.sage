@@ -30,5 +30,5 @@ import mount
 import vfs
 import fuse
 import xattr
-import gc
+import fsgc
 import imgio

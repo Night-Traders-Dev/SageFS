@@ -1,6 +1,6 @@
 import sys
 import segment
-import gc as gc_module
+import fsgc as gc_module
 
 var TESTS_RUN: Int = 0
 var TESTS_PASSED: Int = 0
