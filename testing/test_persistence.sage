@@ -141,7 +141,7 @@ proc main():
     check_int("full payload length after remount", bytes_len(after), size)
     check("payload is byte-for-byte intact after remount", matches(after, payload), true)
 
-    let fd2 = fs2.open("/big.bin", fs2.O_RDONLY)
+    let fd2 = fs2.open("/big.bin", vfs.O_RDONLY)
     check("reopen after remount", fd2 >= 0, true)
     let head = fs2.read(fd2, 64)
     check_int("read() returns what was asked for", bytes_len(head), 64)
@@ -154,7 +154,7 @@ proc main():
     fs2.close(fd2)
 
     ## An inline file must be unaffected by any of this.
-    let fd3 = fs2.open("/small.txt", fs2.O_CREAT | fs2.O_RDWR)
+    let fd3 = fs2.open("/small.txt", vfs.O_CREAT | vfs.O_RDWR)
     let small = bytes("hello inline world")
     check_int("inline write", fs2.write(fd3, small), bytes_len(small))
     fs2.close(fd3)
@@ -162,20 +162,40 @@ proc main():
 
     let fs3 = vfs.VFS(dev)
     check("remount for the inline case", fs3.mount(), true)
-    let ino3 = fs3.resolve_path("/small.txt")
-    ## Tripwire, not an endorsement. A *fourth*, separate defect: _persist_all()
-    ## loses an inode entry when several are written, so a third mount can come
-    ## up without this file's inode even though its extents are still in the tree.
-    ## The entries that do land are framed correctly, so this is about entries
-    ## going missing rather than being misread -- writer and reader disagree about
-    ## where the next entry starts once more than one is present.
+
+    ## A third mount must see *both* files.
     ##
-    ## Not fixed here. The three defects this test was written for are all fixed
-    ## and asserted above; folding a fourth in would mean guessing at the framing
-    ## without a clean reproduction.
-    let got3 = fs3.read_inode_data(ino3b)
-    check("KNOWN BUG: _persist_all loses an inode entry when several are written",
+    ## The inline file, written during the second session.
+    let small_ino = fs3.resolve_path("/small.txt")
+    check("/small.txt survived the third mount", small_ino >= 0, true)
+    let got_small = fs3.read_inode_data(small_ino)
+    check("inline content intact", matches(got_small, small), true)
+
+    ## And the block-mapped file, whose extents had to be reachable from a
+    ## persisted extent root.
+    ##
+    ## This assertion used to be written against the *inline* file's inode while
+    ## comparing its contents to the block-mapped file's payload, so it could
+    ## never pass no matter how healthy the filesystem was. What it actually
+    ## masked was real: open() honoured O_TRUNC for a descriptor that could not
+    ## write, so the read-only reopen above silently truncated big.bin to zero
+    ## bytes and _persist_all() then dropped its entry. VFS.open() now requires
+    ## write access before truncating, so this genuinely exercises the path.
+    let big_ino3 = fs3.resolve_path("/big.bin")
+    check("/big.bin survived the third mount", big_ino3 >= 0, true)
+    let got3 = fs3.read_inode_data(big_ino3)
+    check_int("block-mapped payload length after the third mount",
+              bytes_len(got3), size)
+    check("block-mapped payload intact after the third mount",
           matches(got3, payload), true)
+
+    ## A read-only open must never destroy data, whatever the flags.
+    let ro = fs3.open("/big.bin", vfs.O_RDONLY | vfs.O_TRUNC)
+    check("read-only open with O_TRUNC still succeeds", ro >= 0, true)
+    let still = fs3.read_inode_data(big_ino3)
+    check("read-only open with O_TRUNC preserved the data",
+          matches(still, payload), true)
+    fs3.close(ro)
     fs3.unmount()
 
     ## The superblock checksum must describe the superblock as written.

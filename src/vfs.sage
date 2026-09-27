@@ -610,7 +610,18 @@ class VFS:
             return -1
         if self.next_fd >= MAX_FDS:
             return -1
-        if (flags & O_TRUNC) != 0:
+        ## O_TRUNC is only honoured for a descriptor that may write.
+        ##
+        ## Linux ignores O_TRUNC on a read-only descriptor, and so should we.
+        ## This is not a theoretical guard: a caller that references an O_*
+        ## constant off an instance (`fs.O_RDONLY`) rather than off the module
+        ## (`vfs.O_RDONLY`) ends up passing unusable flags, and those satisfied
+        ## `(flags & O_TRUNC) != 0` while still looking read-only. That truncated
+        ## a file to zero bytes on a read-only open, and _persist_all() then
+        ## skipped the inode for having no size, so the file's entry was dropped
+        ## from the superblock entirely. Requiring write access first means a
+        ## read-only open can never destroy data.
+        if (flags & O_TRUNC) != 0 and (flags & O_ACCMODE) != O_RDONLY:
             let inode_obj = self.inode.get_inode(ino)
             if inode_obj != nil:
                 inode_obj.size = 0

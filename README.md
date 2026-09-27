@@ -39,10 +39,9 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 19/20 files, 511 assertions. The one failure is deliberate** —
-see known issue 12. The suite was previously not
-running at all; see [Known issues](#known-issues) for what is still broken,
-including two entries that can lose data.
+**Tests: 20/20 files, 518 assertions, no known failures.** The suite was
+previously not running at all; see [Known issues](#known-issues) for what is
+still broken.
 
 ## Key Features
 
@@ -136,7 +135,7 @@ SageFS integrates Python-like readable and C-like performant SageLang to deliver
     against this implementation
   - No lock-free hot paths, no io_uring
 
-- **Development**: 20 test files, 511 assertions, 6 CLI tools
+- **Development**: 20 test files, 518 assertions, 6 CLI tools
 
 The binary image format uses little-endian encoding with 4 KiB blocks and 512
 blocks per segment. The B+ tree is the exception: its node magic and its keys
@@ -221,7 +220,7 @@ What is missing is a working session setup.
 ### Run Tests
 
 ```bash
-# Full test suite — 20 files, 511 assertions
+# Full test suite — 20 files, 518 assertions
 ./sagemake test
 
 # A single file
@@ -469,25 +468,27 @@ SIT 12.5% too small.
 in-memory structures that die at unmount, despite `compute_layout()` reserving
 regions for them.
 
-**12. An inode's size can reach 0, and then `_persist_all()` drops it.**
-Reproducible from a fresh image, and *not* a framing problem — `write_inode_entry_at`
-and `read_inode_entries_from_area` agree byte for byte on the 16-byte header
-(`ino`@0, `mode`@4, `size`@8, `name_len`@12, `data_len`@14) and both step by
-`16 + name_len + data_len`. The entry is written and then never read back because
-it was never written at all: `_persist_all()` skips any inode with no inline data
-**and** `size == 0`.
+**12. ~~A read-only `open()` could truncate a file to zero bytes.~~ Fixed.**
+`_persist_all()` skips any inode with no inline data **and** `size == 0`, so an
+inode truncated to zero was silently dropped from the superblock — the file's
+extents stayed in the tree but a later mount came up without it.
 
-Tracing it: a block-mapped file is restored at mount with `size = 8192` and is
-present in the inode table, but by unmount its size is 0, so the guard skips it
-and the third mount comes up without the inode even though its extents are still
-in the tree. Something zeroes the size between mount and unmount; the candidates
-are the `O_TRUNC` branch in `VFS.open()` (which is *not* it — `O_RDONLY` is 0 and
-`O_TRUNC` is `0x0200`, so the test does not trip it) and inode re-creation
-replacing the table entry. Not yet pinned down.
+The cause was two bugs compounding. `VFS.open()` honoured `O_TRUNC` regardless
+of access mode, so `O_RDONLY | O_TRUNC` destroyed the file. The trigger was a
+caller referencing an `O_*` constant off an instance (`fs.O_RDONLY`) instead of
+off the module (`vfs.O_RDONLY`): that resolves to nil, and nil satisfied
+`(flags & O_TRUNC) != 0` while still looking read-only. `open()` now requires
+write access before truncating, matching Linux, which ignores `O_TRUNC` on a
+read-only descriptor. The test also uses the module-qualified constants.
 
-Two things make this survivable today and neither is good enough: the file's data
-is still reachable through the extent tree, and `testing/test_persistence.sage`
-carries a tripwire so the suite reports one deliberate failure until it is fixed.
+Worth recording how this hid for so long: the assertion that was supposed to
+catch it resolved `"/small.txt"` — the inline file — and then compared its
+contents against `payload`, the block-mapped file's 8192 bytes. It compared two
+different files and could never pass, so it was filed as an unexplained
+filesystem failure with a plausible-sounding theory about entry framing. Both
+halves were wrong. `testing/test_persistence.sage` now checks each file against
+its own contents on the third mount, and asserts that a read-only open with
+`O_TRUNC` set leaves the data intact.
 
 ---
 
