@@ -554,6 +554,18 @@ class InodeManager:
     # Inode allocation
     # -------------------------------------------------------------------------
 
+    ## Ensure `next_ino` is past a given inode number.
+    ##
+    ## Inode numbers restored from disk are inserted straight into the table,
+    ## bypassing create_inode(), so nothing advanced next_ino past them. Since
+    ## next_ino starts at 2 and create_inode() hands out next_ino and increments,
+    ## the first file created after a remount was given an inode number that a
+    ## restored file already owned -- two files sharing one inode, each
+    ## overwriting the other's data. Nothing reported it.
+    proc note_inode(self, ino: Int):
+        if ino >= self.next_ino:
+            self.next_ino = ino + 1
+
     proc create_inode(self, mode: Int, uid: Int, gid: Int) -> SageFSInode:
         ## Allocate a new inode with the given mode, owner, and group.
         ##
@@ -611,6 +623,9 @@ class InodeManager:
         let root: SageFSInode = SageFSInode(ROOT_INO, nid, root_mode)
         root.nlink = 2
         root.set_flag(INODE_FLAG_INLINE_DENTRY)
+        ## ROOT_INO is below the initial next_ino, but keep the invariant explicit
+        ## so a future change to either constant cannot reintroduce the collision.
+        self.note_inode(ROOT_INO)
 
         let key: String = str(ROOT_INO)
         self.inodes[key] = root

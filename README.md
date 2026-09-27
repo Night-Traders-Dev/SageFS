@@ -39,7 +39,8 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 19/19 files, 485 assertions passing.** The suite was previously not
+**Tests: 19/20 files, 508 assertions. The one failure is deliberate** —
+see known issue 12. The suite was previously not
 running at all; see [Known issues](#known-issues) for what is still broken,
 including two entries that can lose data.
 
@@ -135,7 +136,7 @@ SageFS integrates Python-like readable and C-like performant SageLang to deliver
     against this implementation
   - No lock-free hot paths, no io_uring
 
-- **Development**: 19 test files, 485 assertions, 6 CLI tools
+- **Development**: 20 test files, 508 assertions, 6 CLI tools
 
 The binary image format uses little-endian encoding with 4 KiB blocks and 512
 blocks per segment. The B+ tree is the exception: its node magic and its keys
@@ -220,7 +221,7 @@ What is missing is a working session setup.
 ### Run Tests
 
 ```bash
-# Full test suite — 19 files, 485 assertions
+# Full test suite — 20 files, 508 assertions
 ./sagemake test
 
 # A single file
@@ -408,10 +409,27 @@ counts the live blocks and refuses, leaving the segment untouched. Relocating
 them needs a block -> owner index that does not exist, so this is a guard rather
 than a fix; `needs_gc()` can still report true while nothing is reclaimable.
 
-**3. The extent map does not survive a remount.** `VFS.mount()` builds the tree
-as `BTreeEngine(self, 0, 1)` — root block 0, i.e. permanently "empty" — so after
-a remount every block-mapped file reads back empty. The root block is never
-persisted in the superblock.
+**3. ~~The extent map does not survive a remount.~~ Fixed, and two more bugs
+came with it.** Three separate defects, each masking the next:
+
+- The tree was rebuilt as `BTreeEngine(self, 0, 1)` — root block 0, which the
+  tree reads as "empty" — so every remount started with no extent map. Format
+  v1.4 records `extent_root_blk` and `extent_generation` in the superblock.
+- `_ensure_stub_inode()` restored an inode's size only when the inline payload
+  was non-empty, so a block-mapped file reported size 0 after a remount even
+  though the right size was in the inode-entry area.
+- **`VFS.write()` silently truncated.** It allocated one block per call and
+  passed the whole buffer to `_write_block()`, which copies at most one block. A
+  write larger than 4096 bytes kept only its first 4 KiB, still reported the
+  full byte count as written, and set the inode size to the full length. No error
+  anywhere. Writes now spread across as many blocks as they need.
+
+**3b. Inode numbers were reused across remounts.** `next_ino` starts at 2 and is
+advanced only by `create_inode()`. Inodes restored from disk were inserted into
+the table without advancing it, so the first file created after a remount was
+given a number a restored file already owned — two files sharing one inode, each
+overwriting the other's data, silently. `InodeManager.note_inode()` now keeps
+the allocator ahead of anything in the table, and `create_root()` uses it too.
 
 **4. Only one directory can persist.** `_save_dir()` writes a directory listing
 into the inode-entry slot at `area_start` regardless of which inode is the
@@ -445,6 +463,14 @@ SIT 12.5% too small.
 in-memory structures that die at unmount, despite `compute_layout()` reserving
 regions for them.
 
+**12. `_persist_all()` loses an inode entry when several are written.** The
+entries that do land are framed correctly, so this is entries going missing
+rather than being misread — the writer and reader appear to disagree about
+where the next entry begins once more than one is present. In practice a third
+mount can come up missing a file's inode even though its extents are still in the
+tree. `testing/test_persistence.sage` carries a tripwire for it, so the suite
+reports one deliberate failure until it is fixed.
+
 ---
 
 ## Command-line tools
@@ -456,7 +482,7 @@ entry points:
 | Command | What it does |
 | --- | --- |
 | `./sagemake build` | compiles the tools into `build/` |
-| `./sagemake test` | runs all 19 test files |
+| `./sagemake test` | runs all 20 test files |
 | `build/mkfs.sagefs <image> [--size MB] [--label NAME] [--block-size N] [--segment-size N] [--force]` | format an image |
 | `build/mkfs.sagefs --check <image>` | verify the magic number |
 | `sage --runtime bytecode -I src src/mount.sage <image> <mountpoint>` | mount via FUSE |

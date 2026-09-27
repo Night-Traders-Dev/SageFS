@@ -131,14 +131,15 @@ proc main():
     check("remount", fs2.mount(), true)
     let st = fs2.stat("/bigfile.bin")
     check("bigfile.bin exists after remount", st["exists"], true)
-    ## Tripwire, not an endorsement: the payload of a block-mapped file does not
-    ## survive a remount yet, because VFS.mount() builds the extent tree as
-    ## BTreeEngine(self, 0, 1) -- root block 0, i.e. permanently empty -- and the
-    ## inode's data_offset/size are not written to the reserved inode-entry area.
-    ## That is a separate defect from journalling and is tracked on its own; this
-    ## assertion exists so that when it is fixed, this test says so.
-    check("KNOWN BUG: block-mapped payload does not survive remount",
-          st["size"], 0)
+    check("bigfile.bin size survives remount", st["size"], 8192)
+
+    ## The payload too, not just the size. Both used to be lost: the extent tree
+    ## was rebuilt at root block 0 on every mount, and the inode's size was only
+    ## restored when there was inline data. See testing/test_persistence.sage,
+    ## which covers this in more depth.
+    let ino = fs2.resolve_path("/bigfile.bin")
+    let payload_back = fs2.read_inode_data(ino)
+    check("bigfile.bin payload survives remount", bytes_len(payload_back) == 8192, true)
     fs2.unmount()
 
     print("  Results: " + str(TESTS_PASSED) + "/" + str(TESTS_RUN) + " passed")

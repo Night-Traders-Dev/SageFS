@@ -39,7 +39,7 @@ let SAGEFS_MAGIC: Int = 0x53414745
 ##   inode_entry_byte_size and moved the checksum to 448; v1.3 added
 ##   journal_start_blk / journal_block_count and moved the checksum to 464.
 let SAGEFS_VERSION_MAJOR: Int = 1
-let SAGEFS_VERSION_MINOR: Int = 3
+let SAGEFS_VERSION_MINOR: Int = 4
 
 ## Default block size in bytes (must be power-of-two, >= 4096)
 let DEFAULT_BLOCK_SIZE: Int = 4096
@@ -49,7 +49,7 @@ let DEFAULT_SEGMENT_SIZE: Int = 512
 
 ## Number of bytes needed to read the superblock header (including image_size,
 ## inode area and journal region fields)
-let SUPERBLOCK_HEADER_SIZE: Int = 464
+let SUPERBLOCK_HEADER_SIZE: Int = 480
 
 ## Byte offsets of the two superblock copies
 let SUPERBLOCK_OFFSET: Int = 0
@@ -414,6 +414,12 @@ class SageFSSuperblock:
         self.journal_start_blk = 0      # block offset for the journal region
         self.journal_block_count = 0    # blocks reserved for the journal; 0 = disabled
 
+        # -- extent tree --
+        # The B+ tree that maps (inode, offset) -> block.  Its root has to be
+        # recorded or every remount rebuilds an empty tree and loses the mapping.
+        self.extent_root_blk = 0        # 0 = no tree yet
+        self.extent_generation = 0
+
         # -- integrity --
         self.checksum = 0
 
@@ -616,8 +622,15 @@ class SageFSSuperblock:
         write_le64(buf, self.journal_start_blk)   # 448
         write_le32(buf, self.journal_block_count) # 456
 
+        # -- extent tree (v1.4+) --
+        # Packed directly after journal_block_count, for the same reason: a gap
+        # here would shift every later field against the absolute offsets
+        # deserialize() reads, and nothing would report an error.
+        write_le64(buf, self.extent_root_blk)     # 460
+        write_le64(buf, self.extent_generation)   # 468
+
         # -- integrity checksum (must be last) --
-        write_le32(buf, self.checksum)        # 460
+        write_le32(buf, self.checksum)        # 476
 
         return buf
 
@@ -658,6 +671,8 @@ class SageFSSuperblock:
         d["inode_entry_start_blk"] = self.inode_entry_start_blk
         d["journal_start_blk"] = self.journal_start_blk
         d["journal_block_count"] = self.journal_block_count
+        d["extent_root_blk"] = self.extent_root_blk
+        d["extent_generation"] = self.extent_generation
         d["inode_entry_byte_size"] = self.inode_entry_byte_size
         d["checksum"] = self.checksum
         return d
@@ -749,7 +764,17 @@ proc deserialize_superblock(buf: Bytes) -> SageFSSuperblock:
         sb.journal_start_blk = 0
         sb.journal_block_count = 0
 
-    if sb.version_minor >= 3:
+    ## v1.4+ fields (extent tree root at 464, generation at 472).
+    if sb.version_minor >= 4 and bytes_len(buf) >= 480:
+        sb.extent_root_blk = read_le64(buf, 460)
+        sb.extent_generation = read_le64(buf, 468)
+    else:
+        sb.extent_root_blk = 0
+        sb.extent_generation = 0
+
+    if sb.version_minor >= 4:
+        sb.checksum = read_le32(buf, 476)
+    elif sb.version_minor >= 3:
         sb.checksum = read_le32(buf, 460)
     elif sb.version_minor >= 2:
         sb.checksum = read_le32(buf, 448)

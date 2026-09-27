@@ -235,7 +235,13 @@ class VFS:
                 root_inode_val.set_flag(rkey)
 
         if self.btree == nil:
-            self.btree = btree_module.BTreeEngine(self, 0, 1)
+            ## Use the root recorded at unmount. This used to be hardcoded to
+            ## BTreeEngine(self, 0, 1) -- root block 0, which the tree itself
+            ## treats as "empty" -- so every remount began with an empty extent
+            ## map and every block-mapped file read back as zero bytes. The root
+            ## is written back in unmount() below.
+            self.btree = btree_module.BTreeEngine(self, self.sb.extent_root_blk,
+                                                  self.sb.extent_generation + 1)
 
         if self.extent == nil:
             self.extent = extent_module.ExtentTree(self.btree)
@@ -316,6 +322,7 @@ class VFS:
                     else:
                         target.set_inline_data(l_data)
                         target.size = l_size
+                        self.inode.note_inode(l_ino)
                 i = i + 1
 
             i = 0
@@ -374,9 +381,16 @@ class VFS:
             stub.set_flag(inode_module.INODE_FLAG_INLINE_DENTRY)
         if len(inline_data) > 0:
             stub.set_inline_data(inline_data)
-            stub.size = size
+        ## Size must be restored whether or not there is inline data. A
+        ## block-mapped file has an empty inline payload and a non-zero size, so
+        ## gating this on the payload left every such file reporting size 0
+        ## after a remount even though the correct size was sitting in the
+        ## inode-entry area on disk.
+        stub.size = size
         self.inode.inodes[str(ino)] = stub
         self.inode.dirty_inodes[str(ino)] = true
+        ## Keep the allocator ahead of the inode we just restored.
+        self.inode.note_inode(ino)
 
     proc _persist_all(self):
         let bs = self._init_block_size()
@@ -406,6 +420,13 @@ class VFS:
             return false
         self._persist_all()
         self.sb.image_size = bytes_len(self.image_buf)
+
+        ## Record where the extent tree lives, so the next mount can find it.
+        ## Done before serialize() below, since that is what lands on disk.
+        if self.extent != nil and self.extent.btree != nil:
+            self.sb.extent_root_blk = self.extent.btree.root_block
+            self.sb.extent_generation = self.extent.btree.current_generation
+
         let sb_bytes = self.sb.serialize()
         let bs = self._init_block_size()
         var i = 0
@@ -657,14 +678,39 @@ class VFS:
             inode_obj.set_inline_data(new_data)
             inode_obj.size = len(new_data)
         else:
+            ## Spread the write across as many blocks as it needs.
+            ##
+            ## This used to allocate a single block, hand the whole buffer to
+            ## _write_block() -- which copies at most one block's worth -- and
+            ## record an extent of length 1. So a write larger than the block
+            ## size kept only its first 4 KiB and still reported the full byte
+            ## count as written, and the inode's size was set to the full length.
+            ## Nothing reported an error: the data was simply gone, and a
+            ## subsequent read returned a short file.
             self.txmgr.begin()
-            let alloc_info = self._alloc_block_addr("warm")
-            if alloc_info == nil:
+            let bs = self._init_block_size()
+            var placed = 0
+            var failed = false
+            while placed < written:
+                let chunk_len = bs
+                if written - placed < bs:
+                    chunk_len = written - placed
+                let alloc_info = self._alloc_block_addr("warm")
+                if alloc_info == nil:
+                    failed = true
+                    break
+                let phys_blk = alloc_info["physical_blk"]
+                let chunk = bytes()
+                var c = 0
+                while c < chunk_len:
+                    bytes_push(chunk, bytes_get(data, placed + c))
+                    c = c + 1
+                self._write_block(phys_blk, chunk)
+                self.extent.insert_extent(f.ino, f.pos + placed, phys_blk, 1)
+                placed = placed + chunk_len
+            if failed:
                 self.txmgr.abort()
                 return -1
-            let phys_blk = alloc_info["physical_blk"]
-            self._write_block(phys_blk, data)
-            self.extent.insert_extent(f.ino, f.pos, phys_blk, 1)
             inode_obj.size = new_size
             self.txmgr.commit()
         self.inode.update_inode(f.ino)
