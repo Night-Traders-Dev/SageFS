@@ -12,7 +12,7 @@ Provides per-block integrity checksums for both metadata and data blocks. Three 
 |----|----------|-----------|-------|
 | 0 | `CHECKSUM_CRC32C` | CRC-32 Castagnoli (poly `0x82F63B78`) | Default; hardware-accelerated; BTRFS/iSCSI/ext4 compatible |
 | 1 | `CHECKSUM_XXHASH` | xxHash32 | Very fast non-cryptographic hash; reference-compatible |
-| 2 | `CHECKSUM_SHA256` | SHA-256 (folded to 32 bits) | Cryptographic ("paranoid") mode; full hex digest available for dedup |
+| 2 | `CHECKSUM_SHA256` | **Stub.** Returns the hard-coded digest of the empty string for any input. | Not usable. |
 
 `CHECKSUM_NONE = 0` (reserved) means "no checksum recorded / untracked". Fixed-width arithmetic is enforced with `MASK32`/`MASK64`.
 
@@ -22,8 +22,8 @@ Provides per-block integrity checksums for both metadata and data blocks. Three 
 |----------|-------------|
 | `crc32c(data: Bytes) -> Int` | CRC32C checksum (table-driven, reflected algorithm) |
 | `xxhash32(data: Bytes, seed: Int) -> Int` | xxHash32 with seed |
-| `sha256_hex(data: Bytes) -> String` | Full 64-char SHA-256 hex digest (dedup fingerprint) |
-| `sha256_fold32(data: Bytes) -> Int` | SHA-256 folded to a 32-bit checksum |
+| `sha256_hex(data: Bytes) -> String` | Returns the empty-string digest. Not a real SHA-256. |
+| `sha256_fold32(data: Bytes) -> Int` | Folds the same stub digest. |
 | `checksum_block(data: Bytes, algo: Int) -> Int` | **Unified dispatch** by algorithm ID |
 | `verify_block(data: Bytes, algo: Int, expected: Int) -> Bool` | Recompute and compare |
 
@@ -70,7 +70,16 @@ The CRC32C and xxHash32 implementations are validated against standard known-ans
 
 - **CRC32C** uses a lazily-built 256-entry lookup table and the reflected algorithm, matching the hardware `crc32c` instruction and BTRFS output.
 - **xxHash32** follows the canonical primes, rotate amounts, and avalanche for bit-compatible output.
-- **SHA-256** uses SageLang's native `sha256()` builtin; the 256-bit digest is folded to 32 bits by XORing its eight 32-bit words for the fixed-width on-disk checksum fields.
+- **SHA-256 is not implemented.** `checksum.sage` returns the well-known digest of
+  the empty string regardless of input, and says so in a comment. Anything
+  documented as depending on SHA-256 — notably block fingerprinting for dedup —
+  cannot be using it, and does not: `dedup.sage` uses a 32-bit polynomial hash.
+
+  Note also that the superblock and checkpoint checksums do **not** go through
+  `checksum_block()`. They concatenate fields into a `String` and call the
+  builtin `hash()` (FNV-1a), so `checksum_algo` does not describe how they were
+  computed. Inode checksums *do* use `crc32c`, but over colon-delimited text
+  rather than the binary layout.
 
 ## Roadmap Integration
 

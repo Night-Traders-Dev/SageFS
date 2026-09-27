@@ -22,7 +22,10 @@ SageFS disk images.  Images are persisted as native binary via
 
 ## Inode Directory Format
 
-After the 428-byte superblock, the image may contain zero or more inode
+The reserved inode-entry area lives at `inode_entry_start_blk * block_size`,
+which is byte 32768 on a default volume — **not** immediately after the
+superblock. The superblock is 452 bytes (it was 428 before format v1.2). Each
+image may contain zero or more inode
 directory entries.  Each entry is a variable-length binary record:
 
 | Offset | Size | Field |
@@ -40,11 +43,11 @@ The entry list is terminated by end-of-buffer (no length prefix).
 ## Binary Format
 
 The image is a raw binary file written via `io.writebytes` and read via
-`io.readbytes`.  All multi-byte fields are little-endian.  The first 428
+`io.readbytes`.  All multi-byte fields are little-endian.  The first 452
 bytes form the superblock, followed by zero or more inode directory entries.
 
 ## Related
 
-- `src/superblock.sage` — superblock (first 428 bytes of every image)
+- `src/superblock.sage` — superblock (first 452 bytes of every image)
 - `src/vfs.sage` — VFS mount reads the inode directory after the superblock
 - `src/mkfs.sage` — formats images (superblock + inode directory)

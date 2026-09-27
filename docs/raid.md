@@ -11,10 +11,10 @@ Provides multi-device support with parity protection (RAID 0, 1, 5, 6, 10). Inte
 - Drive rebuild capabilities.
 
 ## API
-- `add_device(dev_path)`
-- `read_block(logical_addr) -> Bytes`
-- `write_block(logical_addr, data)`
-- `scrub() -> Bool`
+- `add_device(dev_path)` — **does not exist**
+- `read_block(logical_addr) -> Bytes` — **does not exist**
+- `write_block(logical_addr, data)` — **does not exist**
+- `scrub() -> Bool` — **does not exist**
 - `rebuild(target_dev) -> Bool`
 
 ## Related

@@ -5,7 +5,9 @@
 Provides inline and background data deduplication. Identical blocks are mapped to the same physical address, incrementing reference counts in the deduplication engine.
 
 ## Implementation Details
-- Uses SHA-256 for block fingerprinting.
+- Fingerprints with a 32-bit polynomial hash, `h = (h * 31 + byte) & 0xFFFFFFFF`.
+  **Not SHA-256**, and not collision-resistant. Note that `checksum.sage`'s
+  SHA-256 is a stub that returns the digest of the empty string.
 - Fast path: Bloom filter to skip unique blocks without a hash table lookup.
 - Fingerprint store tracking block addresses for matched hashes.
 - Reference counting to manage deduplicated blocks lifecycle.

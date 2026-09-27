@@ -101,7 +101,7 @@ and parsed by `VFS.mount()` using `imgio.read_inode_entries()`.
 ## Mount Workflow
 
 1. `VFS.mount()` reads the binary image via `imgio.read_image()`
-2. Calls `superblock.deserialize_superblock()` to parse the 428-byte superblock
+2. Calls `superblock.deserialize_superblock()` to parse the 452-byte superblock
 3. If the image has data beyond the superblock, reads the inode directory via `imgio.read_inode_entries()` and populates `self.inodes` and `self.dentries`
 4. Validates the magic (`0x53414745` = "SAGE") via `SAGEFS_MAGIC`
 5. Sets the `mounted` flag to true

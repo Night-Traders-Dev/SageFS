@@ -19,46 +19,91 @@ The result is a filesystem that delivers **superior SSD performance** with **ent
 
 ---
 
+## Project status
+
+Read this before the feature list, because a lot of the design is further along
+than the I/O path.
+
+SageFS currently has two very different halves. The **metadata and data layer**
+— superblock, inodes, inline data, the reserved inode-entry area, the B+ tree,
+the segment manager, the journal, and a POSIX VFS over them — works, and is
+exercised end to end: `test_integration.sage` formats an image, mounts it,
+writes, unmounts, remounts and reads the data back. The **optional feature
+modules** are largely written but not wired into that path.
+
+Status markers used below:
+
+| | meaning |
+| --- | --- |
+| ✅ | implemented and reached from the read/write path |
+| ⚠️ | implemented, but not currently called by any I/O path |
+| ❌ | stubbed, simulated, or not implemented |
+
+**Tests: 18/18 files, 464 assertions passing.** The suite was previously not
+running at all; see [Known issues](#known-issues) for what is still broken,
+including two entries that can lose data.
+
 ## Key Features
 
 ### 🚀 Performance
-- **Log-structured writes** — all writes are sequential, minimizing write amplification on SSDs/NVMe
-- **Multi-head logging** — 6 concurrent log zones with hot/warm/cold temperature classification
-- **NAT indirection** — eliminates cascading CoW updates (the "wandering tree" problem)
-- **Async I/O** — io_uring integration for zero-copy, kernel-side polling
-- **Lock-free hot paths** — per-CPU I/O submission queues
-- **Inline data & directories** — small files stored directly in inodes (zero block allocation)
+- ✅ **Multi-head logging** — 6 log zones with hot/warm/cold classification (`segment.sage`)
+- ✅ **NAT indirection** — nid allocation with a journal-buffered write-back (`nat.sage`)
+- ✅ **Extent-based allocation** — contiguous runs with neighbour merging (`extent.sage`)
+- ✅ **Inline data & directories** — small files stored in the inode, no block allocated
+- ⚠️ **Async I/O** — `aio.sage` is a 3-deep priority queue with an instant-drain
+  `poll()`. No threads, no event loop, no io_uring. The io_uring integration
+  described in earlier revisions was never written.
+- ❌ **Lock-free hot paths / per-CPU submission queues** — not implemented
 
 ### 🛡️ Data Integrity
-- **Per-block checksumming** — CRC32C (hardware-accelerated), xxHash, or SHA-256
-- **Dual superblock mirroring** — survive superblock corruption
-- **Checkpoint packs** — dual alternating packs for atomic metadata commits
-- **Write-ahead journal** — metadata crash recovery with transaction replay
-- **Online scrub** — background checksum verification
-- **Repair-on-read** — automatic corruption repair with RAID redundancy
+- ✅ **CRC32C** — real, table-driven, verified against known-answer vectors
+- ✅ **xxHash32** — real implementation
+- ✅ **Dual superblock mirroring** — primary at block 0, mirror at block 1
+- ⚠️ **Write-ahead journal** — the record format and a correct two-pass
+  recover/replay are implemented, but no reserved region is carved out for it,
+  so the journal currently overlaps the superblock. See known issues.
+- ⚠️ **Checkpoint packs** — structures and (de)serialisation exist; `mkfs` never
+  writes them and nothing reads them back
+- ❌ **SHA-256** — `checksum.sage` returns the hard-coded digest of the empty
+  string for any input
+- ❌ **Online scrub** — `scrub_cli.sage` compares each block against a freshly
+  built empty tree, so it can never detect a mismatch
+- ❌ **Repair-on-read** — not implemented
 
 ### 📸 Snapshots & Subvolumes
-- **Instant CoW snapshots** — clone B+ tree root in O(1)
-- **Writable snapshots** — branch and diverge from any point
-- **Subvolumes** — independent filesystem trees in one partition
-- **Snapshot diff** — efficient delta calculation between snapshots
-- **Rotation policies** — automatic N hourly/daily/weekly retention
+- ✅ **CoW B+ tree** — real copy-on-write with generation counters, sibling
+  borrow and merge (`btree.sage`)
+- ⚠️ **Snapshots** — a snapshot records a root block and a generation, and the
+  CoW machinery it depends on is real, but there is no read path: a snapshot
+  cannot be mounted or read from. The tree is also re-rooted to block 0 on every
+  mount, so snapshot roots do not survive a remount.
+- ❌ **Writable snapshots, snapshot diff, rotation policy** — not implemented.
+  `diff_snapshots()` returns the two root blocks; it does not diff.
 
 ### 📦 Storage Efficiency
-- **Transparent compression** — per-file algorithm (lz4 for speed, zstd for ratio, zlib for compat)
-- **Inline deduplication** — bloom filter fast-path + block fingerprinting
-- **Reflink copies** — instant file clones sharing physical extents
-- **Extent-based allocation** — contiguous block runs for minimal metadata overhead
+- ✅ **Extent tree** — one B+ tree keyed by `(inode, type, offset)`
+- ⚠️ **Transparent compression** — `compress.sage` picks an algorithm by
+  temperature and tracks ratios, then writes a 3-byte header followed by the
+  original bytes. No compression is performed.
+- ⚠️ **Deduplication** — fingerprinting and refcount tables exist, but
+  `check_inline()` never increments a refcount and the fingerprint is a 32-bit
+  polynomial hash, not SHA-256. Nothing is deduplicated.
+- ❌ **Bloom filter** — `bloom_filter` is a `Dict`; `DEDUP_BLOOM_SIZE` is unused
+- ❌ **Reflink copies** — not implemented
 
 ### 🔐 Security
-- **Per-file encryption** — AES-256-XTS with fscrypt-compatible key management
-- **Filename encryption** — AES-256-CTS
-- **Hardware acceleration** — AES-NI for near-zero encryption overhead
+- ❌ **AES-256-XTS / AES-256-CTS** — not implemented. `encrypt.sage` is a
+  repeating-key XOR stream cipher, and `VFS.mount()` constructs it with an
+  **empty** master key. It is not AES, has no KDF, and is not in the I/O path.
+  Do not use it to protect anything.
 
 ### 🔗 Multi-Device
-- **Integrated RAID** — 0 (stripe), 1 (mirror), 5 (parity), 6 (double parity), 10 (stripe+mirror)
-- **Online device management** — add, remove, replace devices without unmounting
-- **Scrub & balance** — periodic verification and data rebalancing
+- ⚠️ **RAID address mapping** — `raid.sage` computes striping geometry and parity
+  for levels 0/1/5/6/10, but has no `read`, `write`, `add_device`, `scrub` or
+  `rebuild`. It is arithmetic with no I/O behind it.
+- ❌ **Online device management, scrub & balance** — not implemented.
+  `balance_cli.sage` prints "Balance completed successfully" without doing
+  anything.
 
 ---
 
@@ -77,24 +122,27 @@ SageFS integrates Python-like readable and C-like performant SageLang to deliver
   - Integration of metadata tree with data management
 
 - **Enterprise data integrity**:
-  - CRC32C/xxHash/SHA-256 per-block checksumming
-  - Dual superblock mirroring & checkpoint packs
-  - Write-ahead journaling + crash recovery
+  - CRC32C and xxHash per-block checksumming (SHA-256 is a stub)
+  - Dual superblock mirroring; checkpoint packs defined but not yet written
+  - Write-ahead journal with a correct recover/replay, but no region reserved
 
 - **Storage efficiency**:
-  - Inline data & directories (≤3.4 KiB)
-  - Transparent compression (lz4/zstd/zlib)
-  - Inline deduplication with bloom filters
-  - RAID 0/1/5/6/10 support
+  - Inline data & directories (<=3.4 KiB) — live in the I/O path
+  - Transparent compression, deduplication, RAID — defined, not yet wired in
 
 - **Performance**:
-  - Sequential write ≥2 GB/s, random read ≥650K IOPS
-  - Mount time <0.5s, write amplification <1.2x
-  - Lock-free hot paths, async I/O (io_uring)
+  - The targets listed above are aspirational; no benchmark harness has been run
+    against this implementation
+  - No lock-free hot paths, no io_uring
 
-- **Development**: All modules documented, 16 test files (343 tests), CLI tools
+- **Development**: 18 test files, 464 assertions, 6 CLI tools
 
-The binary image format uses little-endian encoding with 4 KiB blocks, 512 blocks per segment, and integrated data management layer.
+The binary image format uses little-endian encoding with 4 KiB blocks and 512
+blocks per segment. The B+ tree is the exception: its node magic and its keys
+are big-endian, and `Extent.serialize()` is big-endian too, so the
+"all little-endian" claim in `superblock.sage` and in earlier revisions of this
+file holds only for the superblock, journal, NAT, SIT and inode-entry
+structures.
 
 ---
 
@@ -140,30 +188,52 @@ dd if=/dev/zero of=sagefs.img bs=1M count=1024
 ### Mount & Access (FUSE)
 
 ```bash
-# Mount via native FFI (preferred)
 mkdir -p /mnt/sagefs
-sage --runtime bytecode -I src mount.sage sagefs.img /mnt/sagefs
-
-# Access files
+sage --runtime bytecode -I src src/mount.sage sagefs.img /mnt/sagefs
 ls /mnt/sagefs/
-cat /mnt/sagefs/README.txt
-
-# Unmount
 fusermount3 -u /mnt/sagefs
-
-# Fallback: Python FUSE bridge (if native FFI unavailable)
-./build/sagefs-fuse sagefs.img /mnt/sagefs
 ```
+
+**FUSE mounting does not currently work.** Two things block it, and an earlier
+revision of this file claimed otherwise:
+
+- `fuse_init()` calls `fuse_session_new()` with one argument (the real function
+  takes four or five) and never calls `fuse_session_mount()`, so the kernel
+  never routes requests to the file descriptor. `fuse_run()` then ignores the
+  session and reads `/dev/fuse` directly, which has nothing on it.
+- `ffi` is an undefined variable in the current runtime, so `fuse_init_libc()`
+  fails, is swallowed by its own `try`/`catch`, and `fuse_run()` returns
+  immediately. Mounting prints "FFI unavailable, using Python FUSE bridge" and
+  exits.
+
+There is no Python FUSE bridge either. `./build/sagefs-fuse` is referenced from
+this file and from `docs/fuse.md`, `docs/mount.md` and `docs/vfs.md`, but it has
+never existed.
+
+The FUSE *protocol* layer is fine and tested — `test_fuse.sage` covers the ABI
+codec, the response builders, all the `on_op_*` handlers and the opcode dispatch.
+What is missing is a working session setup.
+
+`src/kernel/sagefs.ko` is a separate route (`mount -t sagefs`); see
+`docs/kernel_driver.md` for its state.
 
 ### Run Tests
 
 ```bash
-# Full test suite
+# Full test suite — 18 files, 464 assertions
 ./sagemake test
 
-# Individual tests
+# A single file
+sage --runtime bytecode -I src testing/test_btree.sage
+
+# Verify an image
 ./build/mkfs.sagefs --check sagefs.img
 ```
+
+Note that `exit` is not a global builtin — it lives on the `sys` module, so
+scripts must call `sys.exit(0)`. Under the bytecode runtime an undefined
+variable is fatal (the process exits 70), which is a quieter way to fail than it
+looks.
 
 ---
 
@@ -310,33 +380,90 @@ SageFS is written in [SageLang](https://github.com/Night-Traders-Dev/SageLang), 
 
 ---
 
-## SageFS All-in-One Tool
+## Known issues
 
-SageFS now provides a unified command-line interface for all filesystem operations through the `sagefs` tool. This All-in-One tool combines all SageFS functionality into a single executable, simplifying deployment and usage while maintaining full access to SageFS's advanced features.
+Ordered by severity. The first two can destroy data.
 
-### Commands
+**1. The journal overlaps the superblock and can brick a volume.**
+`VFS.mount()` constructs `Journal(self, 0, 16, bs)`, so the journal region is
+blocks 0-15: the primary superblock, its mirror, the checkpoint packs, and the
+entire reserved inode-entry area. `Journal.sync()` always rewrites the whole
+buffer from `start_blk`, so the first commit after a non-inline write stamps the
+journal's magic over the superblock in the in-memory image. It currently
+survives only because `unmount()` re-serialises the superblock afterwards — a
+crash in between leaves an unreadable volume. Fixing this needs a real reserved
+region carved out of `compute_layout()`.
 
-- `sagefs mkfs <device> [--size MB] [--label NAME] [--force]` - Format a new SageFS volume
-- `sagefs mount <image> <mountpoint> [--ro] [--allow_other]` - Mount a SageFS image
-- `sagefs check <image>` - Verify an existing image's integrity
-- `sagefs version` - Display version and configuration information
-- `sagefs help` - Show command usage and examples
+**2. `fsgc.do_gc` discards live data.** It walks a victim segment's validity
+bitmap, increments `blocks_moved` for each valid block, and then frees the
+segment — without relocating anything. Any live data in it is gone.
+`docs/gc.md` states the opposite. This is currently latent only because nothing
+calls `run_foreground()`/`run_background()`.
 
-### Features
+**3. The extent map does not survive a remount.** `VFS.mount()` builds the tree
+as `BTreeEngine(self, 0, 1)` — root block 0, i.e. permanently "empty" — so after
+a remount every block-mapped file reads back empty. The root block is never
+persisted in the superblock.
 
-✅ **Native binary I/O support**
-- Uses SageLang's `io.writebytes` / `io.readbytes` with `Bytes` type
-- Eliminates hex-text persistence workaround
-- Direct filesystem access for maximum performance
+**4. Only one directory can persist.** `_save_dir()` writes a directory listing
+into the inode-entry slot at `area_start` regardless of which inode is the
+parent, so nested directories share the first slot. Root survives only because
+`_get_dir(ROOT_INO)` short-circuits to the in-memory `DirManager`.
 
-✅ **Qualified type annotations**
-- Supports `let fs: vfs.VFS = vfs.VFS(dev)` syntax
-- Module-type declarations for better code organization
+**5. The superblock checksum is never recomputed on unmount.** `unmount()` sets
+`image_size` without calling `update_checksum()`, so `verify_checksum()` fails on
+a cleanly unmounted volume and fsck's first check fires every time.
 
-✓ **FFI-native deployment** (Phase 1)
-- Native `/dev/fuse` direct I/O via SageVM FFI eliminates Python bridge dependency
-- Consistent interface across all SageFS operations
-- Kernel driver (`sagefs.ko`) — VFS filesystem driver for `mount -t sagefs` (see `docs/kernel_driver.md`)
+**6. `fsck` cannot be run.** `src/fsck.sage` is a library with no `main()`.
+Its orphan and link-count checks are also vacuous, because
+`read_dir_entries()` is a stub that always returns `[]`.
+
+**7. `ROOT_INO` disagrees across the codebase.** `inode.sage` and `vfs.sage` say
+1; `superblock.sage` and the C kernel driver say 3. `fsck.walk()` starts from 3,
+which nothing creates.
+
+**8. `_write_extents` is undefined.** It is called from `truncate()` and
+`punch_hole()` in `extent.sage` but defined nowhere, so both fail at runtime.
+
+**9. The node cache is never invalidated on write.** `VFS.write()` does not drop
+the cached entry, so read-write-read of a block-mapped file can return stale
+content.
+
+**10. SIT region sizing.** `segment.sage` declares `SIT_ENTRY_SIZE = 72` while
+`superblock.sage` sizes the region with `sit_entry_size = 64`, allocating the
+SIT 12.5% too small.
+
+**11. The NAT, SIT, SSA and checkpoint packs are never persisted.** They are
+in-memory structures that die at unmount, despite `compute_layout()` reserving
+regions for them.
+
+---
+
+## Command-line tools
+
+There is **no** unified `sagefs` binary. An earlier revision of this file
+documented one; it was never written. What exists is `sagemake` plus individual
+entry points:
+
+| Command | What it does |
+| --- | --- |
+| `./sagemake build` | compiles the tools into `build/` |
+| `./sagemake test` | runs all 18 test files |
+| `build/mkfs.sagefs <image> [--size MB] [--label NAME] [--block-size N] [--segment-size N] [--force]` | format an image |
+| `build/mkfs.sagefs --check <image>` | verify the magic number |
+| `sage --runtime bytecode -I src src/mount.sage <image> <mountpoint>` | mount via FUSE |
+| `sage --runtime bytecode -I src src/tools/stats_cli.sage <image>` | superblock/segment/allocator/cache summary |
+| `sage --runtime bytecode -I src src/tools/defrag_cli.sage <image> <inode>` | extent report — reports only, does not defragment |
+| `sage --runtime bytecode -I src src/tools/scrub_cli.sage <image>` | currently cannot detect any mismatch |
+| `sage --runtime bytecode -I src src/tools/snapshot_cli.sage <cmd> <subvol>` | operates on an in-memory engine; never opens the image |
+| `sage --runtime bytecode -I src src/tools/dedup_cli.sage <image>` | byte-scan reporting every block as unique |
+| `sage --runtime bytecode -I src src/tools/balance_cli.sage` | prints RAID geometry; does nothing |
+
+`mkfs` is also documented as accepting `--compress` and `--checksum`. It does
+not parse them — they are silently discarded, and every volume is created with
+no feature flags set.
+
+`src/fsck.sage` has no `main()` and cannot be invoked. See known issues.
 
 ---
 

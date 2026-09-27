@@ -18,7 +18,7 @@ sage --runtime bytecode -I src src/mount.sage <image> [mountpoint]
 For full FUSE mounting with userspace access:
 
 ```
-./build/sagefs-fuse <image> <mountpoint>
+build/sagefs-fuse  # DOES NOT EXIST  # DOES NOT EXIST <image> <mountpoint>
 ```
 
 ## Mount Workflow
