@@ -18,6 +18,7 @@
 ##
 ## =============================================================================
 
+import dir as dir_module
 import io
 import sys
 from checksum import crc32c
@@ -801,19 +802,55 @@ class InodeManager:
             push(result, inode.ino)
         return result
 
+    proc hex_to_bytes(self, hex: String) -> Bytes:
+        ## Decode the lowercase hex used for inline inode data. This is the same
+        ## conversion VFS._hex_to_bytes() does; it lives here too because the
+        ## inode manager has to read a directory's own inline data to answer
+        ## read_dir_entries() without going through VFS.
+        let result: Bytes = bytes()
+        var i: Int = 0
+        let hlen: Int = len(hex)
+        while i + 1 < hlen:
+            var hi: Int = 0
+            var lo: Int = 0
+            let c1: Int = ord(hex[i])
+            if c1 >= 48 and c1 <= 57:
+                hi = c1 - 48
+            elif c1 >= 97 and c1 <= 102:
+                hi = c1 - 97 + 10
+            let c2: Int = ord(hex[i + 1])
+            if c2 >= 48 and c2 <= 57:
+                lo = c2 - 48
+            elif c2 >= 97 and c2 <= 102:
+                lo = c2 - 97 + 10
+            bytes_push(result, (hi << 4) | lo)
+            i = i + 2
+        return result
+
     proc read_dir_entries(self, ino: Int) -> Array:
-        ## Return an array of dicts with 'ino' and 'name' keys for
-        ## directory entries belonging to the given inode.
+        ## Return an array of the directory entries belonging to `ino`.
         ##
-        ## Returns an empty array for non-directory inodes or if the
-        ## inode is not found.
+        ## This used to `return []` unconditionally, with a comment deferring to
+        ## "the dentry manager". That made it actively dangerous rather than
+        ## merely incomplete: it is the only way Fsck.walk() reaches anything
+        ## below the root, so with it returning nothing, `walk()` never
+        ## recursed, every inode in the image looked unreferenced, and
+        ## `fsck --repair` would have deleted the entire filesystem. Because
+        ## ROOT_INO was briefly a different value from 1, a real fsck could
+        ## have reported the live root as an orphan and removed it.
+        ##
+        ## Decodes the same on-disk format as VFS._save_dir(), via
+        ## DirManager.deserialize(). Returns an empty array for a non-directory
+        ## or unknown inode. A directory too large to hold its entries inline
+        ## is not representable yet (the inode area is a fixed 32 KiB and
+        ## MAX_INLINE_DENTRIES caps a directory at 200 entries), so every
+        ## directory this can return is inline.
         let key = str(ino)
         if not dict_has(self.inodes, key):
             return []
-        let inode = self.inodes[key]
-        if not inode.is_dir():
+        let inode_obj = self.inodes[key]
+        if not inode_obj.is_dir():
             return []
-        ## Directory entries are stored inline as a simple format;
-        ## return empty for now — the dentry manager handles the full
-        ## directory entry parsing.
-        return []
+        let dir_mgr = dir_module.DirManager()
+        dir_mgr.deserialize(self.hex_to_bytes(inode_obj.get_inline_data()))
+        return dir_mgr.read_dir()

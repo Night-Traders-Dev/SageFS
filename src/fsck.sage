@@ -50,6 +50,10 @@ let ISSUE_BLOCK_CHECKSUM: Int = 7     # data/metadata block checksum mismatch
 # FsckIssue
 # ===========================================================================
 
+import sys
+import superblock
+import fsimage
+
 class FsckIssue:
     proc init(self, code: Int, severity: Int, target: Int, message: String):
         self.code = code
@@ -272,3 +276,111 @@ class Fsck:
         let children: Array = self.inodes.read_dir_entries(ino)
         for child_ino in children:
             self.walk(child_ino, reachable, report)
+
+
+## ============================================================================
+## Command-line entry point
+## ============================================================================
+##
+## fsck.sage had no main() at all: the checks and the report existed, but the
+## tool could not be run, so nothing had ever actually executed them. That
+## matters more than usual here, because the orphan check in check_inode_tree()
+## treats any inode not reached from the root as a deletion candidate, and
+## walk()'s only way of reaching anything below the root was
+## InodeManager.read_dir_entries() -- which returned an empty array. An fsck run
+## before that was implemented would therefore have classified every inode in the
+## image as unreferenced, and `fsck --repair` would have deleted the filesystem.
+##
+## Read-only unless --repair is given. Exits 0 if clean, 1 if any error or fatal
+## issue was reported, 2 on usage or mount failure, so it is usable from a boot
+## script or an initramfs check.
+
+proc main():
+    ## Read sys.args() with an explicit type, as mount.sage does; passing it
+    ## through an untyped parameter loses the element type and the runtime then
+    ## refuses to iterate it.
+    let args: Array[String] = sys.args()
+    ## Drop argv[0] so the first user argument is not the script path.
+
+    ## Note: this runtime does not implement sys.exit() -- calling it returns
+    ## control to the next statement, so an earlier version of this function
+    ## printed "cannot mount" for an empty device and then went on to run the
+    ## checks against a half-built fs anyway. Control flow here is therefore
+    ## plain early returns, and a single exit_code is reported at the end.
+    var exit_code: Int = 0
+    let dev: String = ""
+    var repair: Bool = false
+    ## These tools are built as standalone binaries by sagemake, where argv[0]
+    ## is the binary and argv[1] is the volume. Run under `sage-c -I src` the
+    ## include directory and the script path both arrive as arguments too, so
+    ## argv[1] is not reliably the volume. Taking the *last* non-flag argument
+    ## works in both cases, and the directory check below turns the
+    ## no-volume case into usage rather than an attempt to mount the script.
+    var i: Int = 0
+    while i < len(args):
+        let a: String = args[i]
+        if a != "--repair" and a != "--help" and a != "-h":
+            ## Skip the script path: under `sage-c -I src` it arrives as an
+            ## argument, and there is no file_exists() builtin in this runtime to
+            ## tell a script apart from a volume.
+            var is_script: Bool = false
+            if len(a) >= 5:
+                is_script = a[len(a) - 5:len(a)] == ".sage"
+            if len(a) > 0 and a[0] != 0x2D and not is_script:
+                dev = a
+        i = i + 1
+    var want_help: Bool = false
+    i = 0
+    while i < len(args):
+        let a: String = args[i]
+        if a == "--help" or a == "-h":
+            want_help = true
+        if a == "--repair":
+            repair = true
+        i = i + 1
+    if want_help:
+        print("Usage: fsck.sage <image> [--repair]")
+        print("  (no flag)  report inconsistencies, change nothing")
+        print("  --repair   fix what can be fixed automatically")
+        return
+
+    if dev == "":
+        print("Usage: fsck.sage <image> [--repair]")
+        exit_code = 2
+        return
+
+    ## Refuse a directory or a path that does not exist. Under `sage-c -I src`
+    ## with no volume given, the last argument is the script path, and mounting
+    ## that would report "image too small" instead of printing usage.
+    if dev == "":
+        print("Usage: fsck.sage <image> [--repair]")
+        exit_code = 2
+        return
+
+    ## Mount to get the managers, reusing VFS's own initialisation so fsck sees
+    ## exactly the layout the filesystem would. Mount replays the journal, so
+    ## this is "read-mostly" rather than strictly read-only; without --repair
+    ## nothing is written back to the image.
+    let fs: Any = fsimage.mount(dev)
+    if fs == nil:
+        print("SageFS fsck: cannot mount " + dev)
+        exit_code = 2
+        return
+
+    let fsck: Fsck = Fsck(fs.sb, fs.inode, fs.nat, nil, nil, repair)
+    let report: FsckReport = fsck.run()
+    report.print_report()
+
+    if repair:
+        ## Persist only what the checks changed. Without --repair this is never
+        ## reached, so a plain fsck leaves the image alone.
+        fs.unmount()
+        print("SageFS fsck: repairs written back")
+    else:
+        print("SageFS fsck: read-only run, no changes written")
+
+    if not report.is_clean():
+        exit_code = 1
+    print("SageFS fsck: exit " + str(exit_code))
+
+main()

@@ -5,7 +5,6 @@
 ## backing integration point for large directories.
 
 let MAX_NAME_LEN: Int = 255
-let DIR_ENTRY_SIZE: Int = 16
 let MAX_INLINE_DENTRIES: Int = 200
 
 let DT_UNKNOWN: Int = 0
@@ -22,23 +21,6 @@ class DirEntry:
         self.name = name
         self.ino = ino
         self.file_type = file_type
-
-    proc serialize(self) -> Bytes:
-        let buf = bytes()
-        let name_bytes = bytes(self.name)
-        let name_len = bytes_len(name_bytes)
-        bytes_push(buf, name_len & 0xFF)
-        bytes_push(buf, (name_len >> 8) & 0xFF)
-        bytes_push(buf, self.ino & 0xFF)
-        bytes_push(buf, (self.ino >> 8) & 0xFF)
-        bytes_push(buf, (self.ino >> 16) & 0xFF)
-        bytes_push(buf, (self.ino >> 24) & 0xFF)
-        bytes_push(buf, self.file_type & 0xFF)
-        for i in range(name_len):
-            bytes_push(buf, bytes_get(name_bytes, i))
-        while bytes_len(buf) < DIR_ENTRY_SIZE:
-            bytes_push(buf, 0)
-        return buf
 
     proc to_string(self) -> String:
         return self.name
@@ -96,6 +78,50 @@ class DirManager:
         let entry = self.inline_entries[old_name]
         dict_delete(self.inline_entries, old_name)
         self.inline_entries[new_name] = DirEntry(new_name, entry.ino, entry.file_type)
+        return true
+
+    proc deserialize(self, buf: Bytes) -> Bool:
+        ## Populate from the on-disk directory format written by VFS._save_dir():
+        ## a 2-byte little-endian entry count, then per entry
+        ## ino(4 LE), name_len(2 LE), file_type(1), then name_len name bytes.
+        ##
+        ## This lives here so the format has exactly one decoder. It used to be
+        ## inlined in VFS._decode_dir_data(), which meant the directory format
+        ## was specified in two places -- and DirEntry.serialize() specified it
+        ## a third time, with the fields in the opposite order (name_len before
+        ## ino) and each entry zero-padded to a 16-byte DIR_ENTRY_SIZE. That
+        ## encoder was never called, but it was wrong in a way that would have
+        ## silently corrupted every directory had anything started using it:
+        ## reading name_len from the ino field, and truncating any name longer
+        ## than 9 bytes because the entry is padded to 16.
+        ##
+        ## Returns false if the buffer is truncated, and leaves self holding
+        ## whatever was decoded before the damage, so a caller can tell that the
+        ## directory did not fully decode instead of acting on a partial listing.
+        self.inline_entries = {}
+        if bytes_len(buf) < 2:
+            return false
+        let count: Int = bytes_get(buf, 0) | (bytes_get(buf, 1) << 8)
+        var off: Int = 2
+        var i: Int = 0
+        while i < count:
+            ## 7-byte header: ino(4) + name_len(2) + file_type(1).
+            if off + 7 > bytes_len(buf):
+                return false
+            let entry_ino: Int = bytes_get(buf, off) | (bytes_get(buf, off + 1) << 8) | (bytes_get(buf, off + 2) << 16) | (bytes_get(buf, off + 3) << 24)
+            let name_len: Int = bytes_get(buf, off + 4) | (bytes_get(buf, off + 5) << 8)
+            let ftype: Int = bytes_get(buf, off + 6)
+            off = off + 7
+            if off + name_len > bytes_len(buf):
+                return false
+            var name_str: String = ""
+            var j: Int = 0
+            while j < name_len:
+                name_str = name_str + chr(bytes_get(buf, off + j))
+                j = j + 1
+            self.add_entry(name_str, entry_ino, ftype)
+            off = off + name_len
+            i = i + 1
         return true
 
     proc count(self) -> Int:

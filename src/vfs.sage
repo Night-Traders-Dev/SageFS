@@ -512,29 +512,12 @@ class VFS:
         return result
 
     proc _decode_dir_data(self, inline_data: String) -> Any:
+        ## Decoding now lives in DirManager.deserialize(), next to the format
+        ## definition, rather than being inlined here. This loop also used to
+        ## guard with `off + 8 <= bytes_len` against a 7-byte header, so it
+        ## silently dropped a final zero-name entry instead of reporting damage.
         let dir_mgr = dir_module.DirManager()
-        if len(inline_data) < 2:
-            return dir_mgr
-        let data_bytes: Bytes = self._hex_to_bytes(inline_data)
-        if bytes_len(data_bytes) < 8:
-            return dir_mgr
-        let count: Int = bytes_get(data_bytes, 0) | (bytes_get(data_bytes, 1) << 8)
-        var off: Int = 2
-        var i: Int = 0
-        while i < count and off + 8 <= bytes_len(data_bytes):
-            let entry_ino: Int = bytes_get(data_bytes, off) | (bytes_get(data_bytes, off + 1) << 8) | (bytes_get(data_bytes, off + 2) << 16) | (bytes_get(data_bytes, off + 3) << 24)
-            let name_len: Int = bytes_get(data_bytes, off + 4) | (bytes_get(data_bytes, off + 5) << 8)
-            let ftype: Int = bytes_get(data_bytes, off + 6)
-            off = off + 7
-            if off + name_len <= bytes_len(data_bytes):
-                var name_str: String = ""
-                var j: Int = 0
-                while j < name_len:
-                    name_str = name_str + chr(bytes_get(data_bytes, off + j))
-                    j = j + 1
-                dir_mgr.add_entry(name_str, entry_ino, ftype)
-                off = off + name_len
-            i = i + 1
+        dir_mgr.deserialize(self._hex_to_bytes(inline_data))
         return dir_mgr
 
     proc _get_dir(self, ino: Int) -> Any:
