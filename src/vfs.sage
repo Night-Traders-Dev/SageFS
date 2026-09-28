@@ -351,6 +351,9 @@ class VFS:
                         ftype = de.file_type
                     self.dir.add_entry(de.name, de.ino, ftype)
 
+        ## Rebuild link counts from the directory tree.
+        self._recompute_link_counts()
+
         self.mounted = true
         self.ino_path_cache = {}
         self.cache_ino_path(ROOT_INO, "/")
@@ -404,6 +407,61 @@ class VFS:
         self.inode.dirty_inodes[str(ino)] = true
         ## Keep the allocator ahead of the inode we just restored.
         self.inode.note_inode(ino)
+
+    proc _recompute_link_counts(self):
+        ## Recompute every inode's nlink from the directory tree.
+        ##
+        ## nlink is not on disk. The on-disk inode entry is a 16-byte header of
+        ## ino/mode/size/name_len/data_len followed by the name and the payload,
+        ## so there is nowhere to store a link count -- write_inode_entry_at()
+        ## takes no nlink argument and the reader has nothing to restore it from.
+        ## A remount therefore reset every count to whatever the loader defaults
+        ## to, and a directory's count never came back.
+        ##
+        ## Rather than widen the entry format for a value that is entirely
+        ## derivable, mount() recomputes it: a file's count is the number of
+        ## directory entries naming it, and a directory's is 2 ("." plus its
+        ## parent's entry) plus its subdirectory count. This is the same rule
+        ## fsck checks, so the two agree by construction rather than by luck.
+        let refs: Dict[Int, Int] = {}
+        let subdirs: Dict[Int, Int] = {}
+        let visited: Dict[Int, Bool] = {}
+        self._walk_link_counts(ROOT_INO, refs, subdirs, visited)
+
+        let all_inos: Array = self.inode.list_inodes()
+        for ino in all_inos:
+            let inode_obj = self.inode.get_inode(ino)
+            if inode_obj == nil:
+                continue
+            var want: Int = 0
+            if inode_obj.is_dir():
+                want = 2
+                if dict_has(subdirs, ino):
+                    want = want + subdirs[ino]
+            elif dict_has(refs, ino):
+                want = refs[ino]
+            if inode_obj.nlink != want:
+                inode_obj.nlink = want
+                self.inode.update_inode(ino)
+
+    proc _walk_link_counts(self, ino: Int, refs: Dict[Int, Int], subdirs: Dict[Int, Int],
+                           visited: Dict[Int, Bool]):
+        if dict_has(visited, ino):
+            return
+        visited[ino] = true
+        subdirs[ino] = 0
+        let inode_obj = self.inode.get_inode(ino)
+        if inode_obj == nil or not inode_obj.is_dir():
+            return
+        let children: Array = self.inode.read_dir_entries(ino)
+        for entry in children:
+            if dict_has(refs, entry.ino):
+                refs[entry.ino] = refs[entry.ino] + 1
+            else:
+                refs[entry.ino] = 1
+            if entry.file_type == dir_module.DT_DIR:
+                subdirs[ino] = subdirs[ino] + 1
+            self._walk_link_counts(entry.ino, refs, subdirs, visited)
 
     proc _persist_all(self):
         let bs = self._init_block_size()
@@ -891,7 +949,8 @@ class VFS:
             push(entries, d.name)
         return entries
 
-    proc mkdir(self, path: String, mode: Int) -> Bool:
+    proc mkdir(self, path: String, mode: Int = 493) -> Bool:
+        ## 493 == 0o755, the mode create_root() uses for the root directory.
         let pinfo = self._lookup_in_parent(path)
         let parent_ino = pinfo["parent_ino"]
         let name = pinfo["name"]
@@ -902,6 +961,13 @@ class VFS:
             return false
         if parent_dir.lookup(name) != -1:
             return false
+        ## Guard the mode explicitly. With no default this runtime passes nil for
+        ## a missing argument instead of raising, so mkdir("/dir") built an inode
+        ## with mode = nil: is_dir() was false, _get_dir() returned nil, and
+        ## everything downstream failed obscurely -- mkdir("/dir/nested") simply
+        ## returned false, and fsck reported a healthy-looking tree as broken.
+        if mode == nil:
+            mode = 493
         let new_inode = self.inode.create_inode(S_IFDIR | (mode & 0xFFF), 0, 0)
         if new_inode == nil:
             return false

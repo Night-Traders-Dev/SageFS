@@ -39,7 +39,7 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 23/23 files, 585 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
+**Tests: 24/24 files, 606 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
 previously not running at all; see [Known issues](#known-issues) for what is
 still broken.
 
@@ -135,7 +135,7 @@ SageFS integrates Python-like readable and C-like performant SageLang to deliver
     against this implementation
   - No lock-free hot paths, no io_uring
 
-- **Development**: 23 test files, 585 assertions, 6 CLI tools
+- **Development**: 24 test files, 606 assertions, 6 CLI tools
 
 The binary image format uses little-endian encoding with 4 KiB blocks and 512
 blocks per segment. The B+ tree is the exception: its node magic and its keys
@@ -220,7 +220,7 @@ What is missing is a working session setup.
 ### Run Tests
 
 ```bash
-# Full test suite — 23 files, 585 assertions
+# Full test suite — 24 files, 606 assertions
 ./sagemake test
 
 # A single file
@@ -524,15 +524,62 @@ all data loss, all now fixed:
 `testing/test_content_cache.sage` covers all of it (31 assertions), including
 that a re-created file does not inherit a recycled inode's cached bytes.
 
-**10. SIT region sizing.** `segment.sage` declares `SIT_ENTRY_SIZE = 72` while
+**10. ~~fsck could not run, and every check in it was broken.~~ Fixed — and one
+of the bugs was destroying the filesystem.** fsck had no `main()` at all, so
+nothing had ever executed it. Four separate defects, each of which failed
+silently:
+
+- `mount()` swept the inode table on **every mount**, deleting every inode whose
+  `nlink <= 0`. Nothing in the write path maintains `nlink`, so this was not a
+  recovery step — mounting a filesystem was enough to delete its inodes, and the
+  freshly created root was itself a candidate. Removed.
+- `FsckReport.add()` called `self.issues.push(issue)`. Lists in this runtime are
+  appended with the global `push(list, value)`, so fsck raised "`.push` is not
+  callable" on the *first issue it found* — crashing on exactly the input it
+  exists to report. A volume with no problems looked clean only because `add()`
+  was never reached.
+- `Fsck.walk()` passed each `DirEntry` into a parameter typed `Int`. The visited
+  set never matched, the cycle guard never fired, and issues came back reported
+  against a `DirEntry`. Every real child was judged unreachable, so a healthy
+  filesystem had its root and its whole subtree flagged as orphans.
+- The link-count check compared `nlink` against the number of directory entries
+  *naming* an inode. A directory's `nlink` is 2 plus its subdirectory count, so
+  the check was wrong by construction for every directory.
+
+`mount()` was also passing the whole manager graph to the `VFS` constructor by
+keyword. That call is broken in this runtime — the constructor's `allocator`
+parameter resolves as an undefined variable, `init()` aborts partway,
+`fs.journal` is left nil, and the mount ends with a single inode. It bought
+nothing: `VFS.mount()` already validates the magic, sizes the read from
+`sb.image_size` and builds every manager. `mount()` now validates and delegates,
+and lives in `src/fsimage.sage` so fsck and mount can share it.
+
+**`nlink` is not stored on disk.** The on-disk inode entry is a 16-byte header of
+`ino`/`mode`/`size`/`name_len`/`data_len` followed by the name and payload;
+`write_inode_entry_at()` takes no `nlink` argument, so no link count ever reached
+stable storage and a remount reset every one of them. Rather than widen the entry
+format for a value that is entirely derivable, mount recomputes it: a file's
+count is the number of entries naming it, a directory's is 2 plus its subdirectory
+count. `mkdir`/`unlink` maintain the parent's count in between. This is the same
+rule fsck checks, so the two agree by construction.
+
+**11. ~~`mkdir(path)` silently created a non-directory.~~ Fixed.** `mkdir` had no
+default for `mode`, and this runtime passes `nil` for a missing argument rather
+than raising. `mkdir("/dir")` therefore built an inode with `mode = nil`:
+`is_dir()` was false, `_get_dir()` returned nil, and the failure surfaced far away
+— `mkdir("/dir/nested")` just returned false, and fsck reported a healthy-looking
+tree as inconsistent. `mode` now defaults to `0o755` and nil is guarded. Every
+existing test passed an explicit mode, which is why this was never hit.
+
+**12. SIT region sizing.** `segment.sage` declares `SIT_ENTRY_SIZE = 72` while
 `superblock.sage` sizes the region with `sit_entry_size = 64`, allocating the
 SIT 12.5% too small.
 
-**11. The NAT, SIT, SSA and checkpoint packs are never persisted.** They are
+**13. The NAT, SIT, SSA and checkpoint packs are never persisted.** They are
 in-memory structures that die at unmount, despite `compute_layout()` reserving
 regions for them.
 
-**12. ~~A read-only `open()` could truncate a file to zero bytes.~~ Fixed.**
+**14. ~~A read-only `open()` could truncate a file to zero bytes.~~ Fixed.**
 `_persist_all()` skips any inode with no inline data **and** `size == 0`, so an
 inode truncated to zero was silently dropped from the superblock — the file's
 extents stayed in the tree but a later mount came up without it.
@@ -554,14 +601,14 @@ halves were wrong. `testing/test_persistence.sage` now checks each file against
 its own contents on the third mount, and asserts that a read-only open with
 `O_TRUNC` set leaves the data intact.
 
-**14. `VFS` exposes no `punch_hole`.** `VFS.truncate()` has been added and
+**15. `VFS` exposes no `punch_hole`.** `VFS.truncate()` has been added and
 updates both halves — the extent map via `ExtentTree.truncate()` and the inode's
 `size` — refusing to grow rather than zero-filling bytes that were never written.
 `punch_hole()` still only exists on `ExtentTree`, so blocks cannot be released
 through the filesystem API, and `ExtentTree.punch_hole()` still requires a
 block-aligned range because extents are block-granular.
 
-**15. A write to a block-mapped file now works in place.** This was folded into
+**16. A write to a block-mapped file now works in place.** This was folded into
 issue 9 above rather than listed separately: before the fix, *any* in-place
 modification of a block-mapped file silently destroyed the parts it did not
 touch.
