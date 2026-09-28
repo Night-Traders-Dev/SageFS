@@ -730,3 +730,35 @@ message is what sent the investigation after `_get_dir()` aliasing and the
 bytecode VM specifically, when the defect was neither. Renaming empty
 directories, non-empty directories and cross-directory moves are all now pinned
 in `testing/test_sparse_and_rename.sage` and pass in both runtimes.
+
+**21. `testing/test_extent.sage` verifies nothing.** Its 55 `assert.equal()`
+calls come from `std.testing`, and in this runtime `assert.equal` is a **silent
+no-op** — it neither raises on failure nor reports anything. The file also
+printed `PASS` after every test proc and an unconditional `ALL TESTS PASSED`
+banner, so there was no failure path at all.
+
+Confirmed by mutation: changing an expected block address from 100 to 999 left
+every test reporting `PASS` and the banner unchanged.
+
+Replacing the assertions with real comparisons immediately exposed how much was
+hidden: **39 of the 55 were failing.** All of them read `got=nil`, because the
+harness builds its B-tree at `BTreeEngine(alloc, 0, 1)` — root block 0, which the
+B-tree treats as the empty sentinel. Every insert landed nowhere and every
+lookup returned nothing. The file has been asserting the wrong values against an
+empty tree and passing.
+
+A second harness defect sits behind the first: `MockAllocator.read_block()`
+returned an empty buffer for any address it had not been handed, while
+`VFS._read_block()` materialises the block on demand. With a real root block the
+B-tree asks for a node that does not exist yet and parses nothing.
+
+The production path is fine — `insert_extent()` is exercised heavily by the
+write, truncate, punch_hole and remount tests, all of which pass. What is missing
+is a faithful standalone mock of the B-tree's block interface: it needs on-demand
+materialisation, and the node/leaf-chain behaviour that `cow_node()` depends on
+when it allocates a new node and moves the root. That mock is the work, and it
+is not done, so this file is left as it was rather than shipped red.
+
+Reinstating it means: drop `std.testing`, use a local `eq()` that counts, make
+the per-proc result and the final banner depend on the counts, build the tree at
+a non-zero root, and materialise blocks on read.
