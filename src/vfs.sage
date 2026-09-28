@@ -244,7 +244,7 @@ class VFS:
                                                   self.sb.extent_generation + 1)
 
         if self.extent == nil:
-            self.extent = extent_module.ExtentTree(self.btree)
+            self.extent = extent_module.ExtentTree(self.btree, self._init_block_size())
 
         if self.dir == nil:
             self.dir = dir_module.DirManager()
@@ -749,7 +749,16 @@ class VFS:
                     bytes_push(chunk, bytes_get(data, placed + c))
                     c = c + 1
                 self._write_block(phys_blk, chunk)
-                self.extent.insert_extent(f.ino, f.pos + placed, phys_blk, 1)
+                ## Length is in bytes, not blocks: end_offset() is
+                ## file_offset + length, so passing 1 described every extent as
+                ## covering a single byte. An 8192-byte file came out as two
+                ## extents of length 1 rather than one of 8192, which left the
+                ## extent map -- the authoritative description of a file's block
+                ## layout -- wrong for every block-mapped file. read_inode_data()
+                ## masked it by walking block_addr and the inode size rather than
+                ## the extents, so reads looked fine while truncate(), punch_hole()
+                ## and anything else reasoning about extents saw nonsense.
+                self.extent.insert_extent(f.ino, f.pos + placed, phys_blk, chunk_len)
                 placed = placed + chunk_len
             if failed:
                 self.txmgr.abort()

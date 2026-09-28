@@ -87,7 +87,7 @@ proc mount(dev: String) -> vfs.VFS:
     nat_table.prefill_free_nids(128)
 
     let btree_eng = btree_module.BTreeEngine(alloc, 0, 1)
-    let extent_tree = extent_module.ExtentTree(btree_eng)
+    let extent_tree = extent_module.ExtentTree(btree_eng, sb.block_size)
     let dir_mgr = dir_module.DirManager()
     let aio_eng = aio_module.AsyncIOEngine()
     let cache_mgr = cache_module.CacheManager(1024, 1024, 512)

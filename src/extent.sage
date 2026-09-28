@@ -60,8 +60,12 @@ class ExtentTree:
     ## Manages extents for an inode using a B+ tree backed by BTreeEngine.
     ## Extents are keyed by BTreeKey(ino, EXTENT_ITEM, file_offset).
 
-    proc init(self, tree_engine: btree.BTreeEngine):
+    proc init(self, tree_engine: btree.BTreeEngine, block_size: Int = 4096):
         self.btree = tree_engine
+        ## Block size in bytes. Needed because extents are block-granular:
+        ## punch_hole() has to convert a byte range into a block-number delta,
+        ## and it was adding byte offsets straight to block addresses.
+        self.block_size = block_size
 
     ## Build a BTreeKey for an extent at the given inode and file offset.
     proc _key(self, ino: Int, offset: Int) -> btree.BTreeKey:
@@ -254,6 +258,32 @@ class ExtentTree:
 
         return nil
 
+    ## Replace the entire extent map for `ino` with `extents`.
+    ##
+    ## truncate() and punch_hole() both compute a complete replacement list and
+    ## call this. It did not exist, so both raised at runtime -- which meant
+    ## punch_hole(), the operation a filesystem uses to release blocks, freed
+    ## nothing and truncate() could not shrink a file. The extent map was left
+    ## describing the old size either way.
+    ##
+    ## Existing keys are collected before any deletion: mutating a B+ tree while
+    ## walking it invalidates the leaf pointer and index the walk is reading from.
+    ## Insertion goes back through insert_extent() so the usual adjacent-extent
+    ## merging still applies.
+    ##
+    ## Blocks dropped by the caller are NOT returned to the allocator -- the tree
+    ## holds only a BTreeEngine and no allocator reference, so there is nowhere to
+    ## free them to. The map stops referencing them, so they are leaked until the
+    ## segment is reused. Wiring an allocator through is separate work; what
+    ## matters here is that the map itself is now correct.
+    proc _write_extents(self, ino: Int, extents):
+        let existing = self._collect_extents(ino)
+        for e in existing:
+            self.btree.delete(self._key(ino, e.file_offset))
+        for e in extents:
+            if e.length > 0:
+                self.insert_extent(ino, e.file_offset, e.block_addr, e.length)
+
     ## Truncate extents to a new smaller file size.
     ## Removes extents past new_size and truncates any straddling extent.
     proc truncate(self, ino: Int, new_size: Int):
@@ -269,39 +299,54 @@ class ExtentTree:
 
     ## Punch a hole (deallocate blocks) in the extent map for the
     ## given range. Splits extents if the hole falls in the middle.
+    ##
+    ## Block arithmetic here is in blocks. It used to add the byte trim straight
+    ## to a block address, so punching 1024..3072 in a file whose first extent
+    ## started at block 240 produced a tail extent at block 3312 -- a block
+    ## number pointing at unrelated data.
+    ##
+    ## The caller must pass a block-aligned range. Extents are block-granular --
+    ## file_offset and length are both multiples of the block size -- so a
+    ## sub-block hole cannot be represented in this model and is not rounded for
+    ## you. A byte-granular extent model is the real fix.
     proc punch_hole(self, ino: Int, offset: Int, length: Int):
         if length <= 0:
             return
+        let bs = self.block_size
+        if bs <= 0:
+            return
+        let hole_offset = offset
         let hole_end = offset + length
         var extents = self._collect_extents(ino)
         var result = []
 
         for e in extents:
             # Case 1: Extent completely swallowed by the hole
-            if e.file_offset >= offset and e.end_offset() <= hole_end:
+            if e.file_offset >= hole_offset and e.end_offset() <= hole_end:
                 continue
             # Case 2: Hole overlaps the beginning of the extent
-            elif e.file_offset >= offset and e.file_offset < hole_end and e.end_offset() > hole_end:
+            elif e.file_offset >= hole_offset and e.file_offset < hole_end and e.end_offset() > hole_end:
                 let trim = hole_end - e.file_offset
                 e.file_offset = hole_end
-                e.block_addr = e.block_addr + trim
+                ## Blocks, not bytes.
+                e.block_addr = e.block_addr + (trim / bs)
                 e.length = e.length - trim
                 push(result, e)
             # Case 3: Hole overlaps the end of the extent
-            elif e.file_offset < offset and e.end_offset() > offset and e.end_offset() <= hole_end:
-                e.length = offset - e.file_offset
+            elif e.file_offset < hole_offset and e.end_offset() > hole_offset and e.end_offset() <= hole_end:
+                e.length = hole_offset - e.file_offset
                 push(result, e)
             # Case 4: Hole splits the extent into two pieces
-            elif e.file_offset < offset and e.end_offset() > hole_end:
+            elif e.file_offset < hole_offset and e.end_offset() > hole_end:
                 let orig_end = e.end_offset()
                 let orig_block = e.block_addr
                 let orig_off = e.file_offset
                 # First piece (before the hole)
-                e.length = offset - e.file_offset
+                e.length = hole_offset - e.file_offset
                 push(result, e)
                 # Second piece (after the hole)
                 let second_length = orig_end - hole_end
-                let second_block = orig_block + (hole_end - orig_off)
+                let second_block = orig_block + ((hole_end - orig_off) / bs)
                 push(result, Extent(hole_end, second_block, second_length))
             else:
                 push(result, e)

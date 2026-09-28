@@ -39,7 +39,7 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 21/21 files, 526 assertions, no known failures.** The suite was
+**Tests: 22/22 files, 554 assertions, no known failures.** The suite was
 previously not running at all; see [Known issues](#known-issues) for what is
 still broken.
 
@@ -135,7 +135,7 @@ SageFS integrates Python-like readable and C-like performant SageLang to deliver
     against this implementation
   - No lock-free hot paths, no io_uring
 
-- **Development**: 21 test files, 526 assertions, 6 CLI tools
+- **Development**: 22 test files, 554 assertions, 6 CLI tools
 
 The binary image format uses little-endian encoding with 4 KiB blocks and 512
 blocks per segment. The B+ tree is the exception: its node magic and its keys
@@ -220,7 +220,7 @@ What is missing is a working session setup.
 ### Run Tests
 
 ```bash
-# Full test suite — 21 files, 526 assertions
+# Full test suite — 22 files, 554 assertions
 ./sagemake test
 
 # A single file
@@ -465,8 +465,31 @@ The driver was a minimal stub that never reads the on-disk superblock, so it
 still uses the constant; the constant now matches, and a comment marks where to
 switch to the parsed field once real superblock parsing lands.
 
-**8. `_write_extents` is undefined.** It is called from `truncate()` and
-`punch_hole()` in `extent.sage` but defined nowhere, so both fail at runtime.
+**8. ~~`_write_extents` is undefined.~~ Fixed.** `truncate()` and `punch_hole()`
+in `extent.sage` both computed a replacement extent list and handed it to a
+`_write_extents()` that existed nowhere, so both raised at runtime. Since
+`punch_hole()` is how a filesystem releases blocks, it freed nothing, and
+`truncate()` could not shrink a file — the map kept describing the old size.
+Implemented, with existing keys collected before deletion so the B+ tree is not
+mutated mid-walk.
+
+Chasing that turned up two more defects underneath it, both in the extent map
+and both previously invisible:
+
+- **`VFS.write()` recorded every extent as one byte long.** It called
+  `insert_extent(ino, offset, block, 1)`, but `length` is in bytes
+  (`end_offset() = file_offset + length`). An 8192-byte file became two extents
+  of length 1 instead of one of 8192. `read_inode_data()` masked it by walking
+  `block_addr` and the inode size rather than the extents, so reads looked
+  correct while the map — the authoritative description of a file's block
+  layout — was wrong for every block-mapped file. Now passes `chunk_len`.
+- **`punch_hole()` added byte offsets to block addresses.** Trimming or
+  splitting computed `e.block_addr + trim` where `trim` was a byte count, so
+  punching 1024..3072 in a file starting at block 240 produced a tail extent at
+  block 3312 — a block number pointing at unrelated data. Block size is now
+  threaded into `ExtentTree` and the deltas are in blocks.
+
+`testing/test_extent_resize.sage` covers all three (28 assertions).
 
 **9. The node cache is never invalidated on write.** `VFS.write()` does not drop
 the cached entry, so read-write-read of a block-mapped file can return stale
@@ -501,6 +524,12 @@ filesystem failure with a plausible-sounding theory about entry framing. Both
 halves were wrong. `testing/test_persistence.sage` now checks each file against
 its own contents on the third mount, and asserts that a read-only open with
 `O_TRUNC` set leaves the data intact.
+
+**14. `VFS` exposes no `truncate` or `punch_hole`.** Both exist on `ExtentTree`
+and now work, but nothing on the filesystem API reaches them, so a file cannot
+actually be shrunk or have blocks released through VFS. `truncate()` also only
+fixes the extent map — it does not update the inode's `size`, so a VFS-level
+truncate would need both halves.
 
 **13. Inode metadata is capped by a fixed 32 KiB reserved area.** Every inode's
 metadata is stored as hex text in a fixed 8-block area at block 8, and the area
