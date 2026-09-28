@@ -987,7 +987,14 @@ class VFS:
         self._save_dir(parent_ino, parent_dir)
         return true
 
-    proc create_file(self, path: String, flags: Int) -> Int:
+    proc create_file(self, path: String, flags: Int = 577) -> Int:
+        ## 577 == O_WRONLY|O_CREAT|O_TRUNC, the mode a caller opening a new file
+        ## for writing would use.
+        ##
+        ## flags had no default, and this runtime passes nil for a missing
+        ## argument rather than raising, so create_file("/x") stored a nil flags
+        ## on the FileDescriptor. Every later flag test on that descriptor then
+        ## compared against nil.
         let pinfo = self._lookup_in_parent(path)
         let parent_ino = pinfo["parent_ino"]
         let name = pinfo["name"]
@@ -998,13 +1005,18 @@ class VFS:
             return -1
         if parent_dir.lookup(name) != -1:
             return -1
+        ## Check for a free descriptor *before* creating anything. This used to
+        ## run after the inode was created and the directory entry was saved, so
+        ## a full descriptor table returned -1 having already made the file: the
+        ## caller saw a failure and retried, and got a second file on the retry
+        ## because the first was already there.
+        if self.next_fd >= MAX_FDS:
+            return -1
         let file_inode = self.inode.create_inode(S_IFREG | 0x1A4, 0, 0)
         if file_inode == nil:
             return -1
         parent_dir.add_entry(name, file_inode.ino, dir_module.DT_REG)
         self._save_dir(parent_ino, parent_dir)
-        if self.next_fd >= MAX_FDS:
-            return -1
         let fd: Int = self.next_fd
         self.next_fd = self.next_fd + 1
         push(self.fds, FileDescriptor(file_inode.ino, flags, 0))
@@ -1032,6 +1044,48 @@ class VFS:
             self.extent.truncate(ino, size)
         inode_obj.size = size
         self.inode.update_inode(ino)
+        self._invalidate_content(ino)
+        return true
+
+    ## Release the blocks backing a byte range, so a sparse region stops
+    ## occupying storage. ExtentTree.punch_hole() already did the block-map half;
+    ## nothing on the filesystem API reached it, so blocks could not be freed
+    ## through the VFS at all.
+    ##
+    ## Extents are block-granular, so the range is snapped outward to block
+    ## boundaries: a caller asking to release bytes 100..200 cannot keep
+    ## block 0 allocated without keeping the bytes 100..200 alive, so a partial
+    ## block is freed whole and reads through the hole return zeroes.
+    proc punch_hole(self, path: String, offset: Int, length: Int) -> Bool:
+        if offset < 0 or length <= 0:
+            return false
+        let ino: Int = self.resolve_path(path)
+        if ino == -1:
+            return false
+        let inode_obj = self.inode.get_inode(ino)
+        if inode_obj == nil:
+            return false
+        if inode_obj.is_dir():
+            return false
+        if self.extent == nil:
+            return false
+        if offset >= inode_obj.size:
+            ## Entirely past end of file: nothing is allocated there to release.
+            return true
+        let bs = self._init_block_size()
+        if bs <= 0:
+            return false
+        ## Do not punch past end of file; the request is clamped, not rejected.
+        var end = offset + length
+        if end > inode_obj.size:
+            end = inode_obj.size
+        self.txmgr.begin()
+        self.extent.punch_hole(ino, int(offset / bs) * bs,
+                               int((end - 1) / bs) * bs + bs - int(offset / bs) * bs)
+        self.txmgr.commit()
+        ## The inode's size is unchanged -- punching a hole leaves a sparse file,
+        ## not a shorter one -- but the blocks behind the range are now gone, so
+        ## anything cached for this inode is stale.
         self._invalidate_content(ino)
         return true
 
@@ -1094,9 +1148,17 @@ class VFS:
             return false
         if not old_dir.remove_entry(old_name):
             return false
+        ## Preserve the entry's type. This hardcoded DT_REG, so renaming a
+        ## directory re-inserted it as a regular file: is_dir() went false, its
+        ## dentries became unreachable, and fsck then reported the whole
+        ## subtree below it as orphans. Resolve the type from the inode itself.
+        var entry_type: Int = dir_module.DT_REG
+        let target_obj = self.inode.get_inode(target_ino)
+        if target_obj != nil and target_obj.is_dir():
+            entry_type = dir_module.DT_DIR
         if new_dir.lookup(new_name) != -1:
             new_dir.remove_entry(new_name)
-        new_dir.add_entry(new_name, target_ino, dir_module.DT_REG)
+        new_dir.add_entry(new_name, target_ino, entry_type)
         self._save_dir(old_parent, old_dir)
         if old_parent != new_parent:
             self._save_dir(new_parent, new_dir)

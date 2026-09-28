@@ -601,7 +601,38 @@ halves were wrong. `testing/test_persistence.sage` now checks each file against
 its own contents on the third mount, and asserts that a read-only open with
 `O_TRUNC` set leaves the data intact.
 
-**15. `VFS` exposes no `punch_hole`.** `VFS.truncate()` has been added and
+**15. `VFS.punch_hole()` exists, but reads through the hole are still wrong.**
+`VFS.truncate()` is complete. `punch_hole()` has been added and does free the
+blocks -- verified: three extents over a 12288-byte file become two, and the
+size is correctly left alone, since punching a hole leaves a sparse file rather
+than a shorter one. The range is snapped outward to block boundaries, because a
+caller cannot release bytes 100..200 while keeping block 0 allocated.
+
+What is not correct is the read side. After punching block 0 of that file, a
+read at offset 0 still returns the old contents and a read at 8192 -- surviving,
+untouched data -- returns nothing, where the extent map says both regions are
+still mapped. So the hole is real in the block map and wrong in the read path.
+`read_inode_data()` needs to zero-fill regions no extent covers; it currently
+does not. Until that is done, `punch_hole` frees storage correctly but leaves
+the file unreadable, so treat it as not yet usable.
+
+**16. ~~`VFS` exposes no `punch_hole`.~~ Superseded by the entry above.**
+
+**17. `rename()` re-inserted directories as regular files.** Fixed. It hardcoded
+`DT_REG` on the moved entry, so renaming a directory made `is_dir()` false, its
+dentries became unreachable, and fsck reported the subtree below it as orphans.
+The type is now resolved from the inode.
+
+**18. `create_file()` and `mkdir()` had no default mode.** Fixed. This runtime
+passes `nil` for a missing argument rather than raising, so both silently built
+inodes with a nil mode -- a non-directory, with `is_dir()` false and
+`_get_dir()` nil. `mkdir` now defaults to `0o755` and guards nil; `create_file`
+defaults to `O_WRONLY|O_CREAT|O_TRUNC`. `create_file` also checked for a free
+descriptor *after* creating the inode and saving the directory entry, so a full
+descriptor table returned -1 having already made the file; the check now runs
+first.
+
+**19. `VFS` exposes no `punch_hole`.** `VFS.truncate()` has been added and
 updates both halves — the extent map via `ExtentTree.truncate()` and the inode's
 `size` — refusing to grow rather than zero-filling bytes that were never written.
 `punch_hole()` still only exists on `ExtentTree`, so blocks cannot be released
