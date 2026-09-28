@@ -39,7 +39,7 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 24/24 files, 606 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
+**Tests: 25/25 files, 647 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
 previously not running at all; see [Known issues](#known-issues) for what is
 still broken.
 
@@ -135,7 +135,7 @@ SageFS integrates Python-like readable and C-like performant SageLang to deliver
     against this implementation
   - No lock-free hot paths, no io_uring
 
-- **Development**: 24 test files, 606 assertions, 6 CLI tools
+- **Development**: 25 test files, 647 assertions, 6 CLI tools
 
 The binary image format uses little-endian encoding with 4 KiB blocks and 512
 blocks per segment. The B+ tree is the exception: its node magic and its keys
@@ -220,7 +220,7 @@ What is missing is a working session setup.
 ### Run Tests
 
 ```bash
-# Full test suite — 24 files, 606 assertions
+# Full test suite — 25 files, 647 assertions
 ./sagemake test
 
 # A single file
@@ -601,20 +601,18 @@ halves were wrong. `testing/test_persistence.sage` now checks each file against
 its own contents on the third mount, and asserts that a read-only open with
 `O_TRUNC` set leaves the data intact.
 
-**15. `VFS.punch_hole()` exists, but reads through the hole are still wrong.**
-`VFS.truncate()` is complete. `punch_hole()` has been added and does free the
-blocks -- verified: three extents over a 12288-byte file become two, and the
-size is correctly left alone, since punching a hole leaves a sparse file rather
-than a shorter one. The range is snapped outward to block boundaries, because a
-caller cannot release bytes 100..200 while keeping block 0 allocated.
-
-What is not correct is the read side. After punching block 0 of that file, a
-read at offset 0 still returns the old contents and a read at 8192 -- surviving,
-untouched data -- returns nothing, where the extent map says both regions are
-still mapped. So the hole is real in the block map and wrong in the read path.
-`read_inode_data()` needs to zero-fill regions no extent covers; it currently
-does not. Until that is done, `punch_hole` frees storage correctly but leaves
-the file unreadable, so treat it as not yet usable.
+**15. ~~Reads through a hole returned the wrong data.~~ Fixed.** `punch_hole()`
+freed the blocks correctly but `read_inode_data()` appended each extent's bytes
+to the end of the result buffer and ignored `ext.file_offset`. That is only
+correct while extents are contiguous and sorted, which the first hole breaks:
+punching block 0 out of a 12288-byte file left extents at 4096 and 8192, whose
+data was concatenated into offsets 0 and 4096, so a read at offset 0 returned
+what belongs at 4096 and a read at 8192 — surviving, untouched data — fell off
+the end of an 8192-byte buffer and returned nothing. The data was not merely
+misplaced, it was unreachable, and the blocks behind it had been freed. Reads
+are now laid out by file offset, with uncovered regions reading as zeroes, which
+is what a hole means. `testing/test_sparse_and_rename.sage` covers a hole in the
+middle, a hole at the start, and both across a remount.
 
 **16. ~~`VFS` exposes no `punch_hole`.~~ Superseded by the entry above.**
 
@@ -720,3 +718,22 @@ MIT License. See [LICENSE](LICENSE) for details.
 ---
 
 *SageFS — Where flash performance meets data integrity.*
+
+**20. Renaming a directory that has children fails under the bytecode VM.**
+Fixed in the C backend, unfixed in the VM. `rename()` had two defects, both
+fixed: it re-inserted the moved entry as `DT_REG` unconditionally, so renaming a
+directory made `is_dir()` false and fsck reported the subtree below it as
+orphans; and it called `_get_dir()` once for the source parent and once for the
+destination, which decodes a *fresh* `DirManager` each time, so a rename within
+one directory operated on two independent copies — the removal went to one and
+the insertion to the other, and the save wrote the copy that had only had the
+removal applied, losing the file.
+
+What remains: renaming a directory that *has children*, then resolving it,
+raises "Arity mismatch" under the bytecode VM. It is not the aliasing — a
+minimal probe renaming an empty directory resolves fine in both runtimes — and
+it is not the cross-parent path, which is exercised and passes. The narrow
+characterisation is: rename succeeds, and the failure is on the subsequent
+`resolve_path()` of a renamed non-empty directory. The test file pins the cases
+that work in both runtimes and deliberately omits this one rather than turning
+the suite red.

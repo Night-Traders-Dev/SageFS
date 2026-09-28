@@ -1140,22 +1140,42 @@ class VFS:
         if old_parent == -1 or new_parent == -1 or len(old_name) == 0 or len(new_name) == 0:
             return false
         let old_dir = self._get_dir(old_parent)
-        let new_dir = self._get_dir(new_parent)
-        if old_dir == nil or new_dir == nil:
+        if old_dir == nil:
             return false
-        let target_ino = old_dir.lookup(old_name)
+        let target_ino: Int = old_dir.lookup(old_name)
         if target_ino == -1:
             return false
-        if not old_dir.remove_entry(old_name):
-            return false
+
         ## Preserve the entry's type. This hardcoded DT_REG, so renaming a
         ## directory re-inserted it as a regular file: is_dir() went false, its
-        ## dentries became unreachable, and fsck then reported the whole
-        ## subtree below it as orphans. Resolve the type from the inode itself.
+        ## dentries became unreachable, and fsck reported the subtree below it as
+        ## orphans. Resolve the type from the inode itself.
         var entry_type: Int = dir_module.DT_REG
         let target_obj = self.inode.get_inode(target_ino)
         if target_obj != nil and target_obj.is_dir():
             entry_type = dir_module.DT_DIR
+
+        ## Same-parent rename, handled without a second directory object.
+        ##
+        ## _get_dir() decodes a *fresh* DirManager from the inode's inline data on
+        ## every call, so the original code -- which called it once for the source
+        ## parent and once for the destination -- held two independent copies of
+        ## the same directory whenever the parents matched. The removal went to one
+        ## copy and the insertion to the other, and the save wrote whichever copy
+        ## had only had the removal applied, so a rename within a directory lost
+        ## the file.
+        if old_parent == new_parent:
+            if not old_dir.remove_entry(old_name):
+                return false
+            old_dir.add_entry(new_name, target_ino, entry_type)
+            self._save_dir(old_parent, old_dir)
+            return true
+
+        let new_dir = self._get_dir(new_parent)
+        if new_dir == nil:
+            return false
+        if not old_dir.remove_entry(old_name):
+            return false
         if new_dir.lookup(new_name) != -1:
             new_dir.remove_entry(new_name)
         new_dir.add_entry(new_name, target_ino, entry_type)
@@ -1183,10 +1203,27 @@ class VFS:
             if bytes_len(hit) > 0:
                 return hit
         let extents = self.extent._collect_extents(ino)
+        let size: Int = inode_obj.size
         if len(extents) == 0:
             return bytes()
         let bs = self._init_block_size()
+        ## Lay the result out by file offset, not by arrival order.
+        ##
+        ## The old loop appended each extent's bytes to the end of the buffer and
+        ## ignored ext.file_offset entirely. That is only correct when the extents
+        ## happen to be contiguous and sorted, which a file's first hole breaks.
+        ## Punching block 0 out of a 12288-byte file left two extents at 4096 and
+        ## 8192; their data was concatenated into offsets 0 and 4096, so a read at
+        ## offset 0 returned what should have been at 4096, and a read at 8192 fell
+        ## off the end of an 8192-byte buffer and returned nothing at all. The
+        ## surviving data was not merely misplaced, it was unreachable.
+        ##
+        ## Sparse regions read as zeroes, which is what a hole means.
         var result = bytes()
+        var pre = 0
+        while pre < size:
+            bytes_push(result, 0)
+            pre = pre + 1
         for ext in extents:
             ## Walk whole blocks, taking only the bytes this extent covers.
             ##
@@ -1198,32 +1235,26 @@ class VFS:
             ## block 4096 (one past total_blocks) and ran on past it, reaching
             ## 17 MB. unmount() then persisted that length, and the next mount
             ## read the oversized file back and the VM died copying it.
-            ##
-            ## It was masked for as long as extents falsely reported a length of
-            ## one byte: that meant a single block read, whose contents were then
-            ## trimmed to the inode size, which looked correct. Fixing the writer
-            ## to record real byte lengths exposed the reader's assumption.
             var remaining = ext.length
             var blk = ext.block_addr
+            var dst: Int = ext.file_offset
             while remaining > 0:
+                if dst >= size:
+                    break
                 var take = bs
-                if remaining < bs:
+                if remaining < take:
                     take = remaining
+                ## Never write past the inode's size.
+                if dst + take > size:
+                    take = size - dst
                 let blk_data = self._read_block(blk)
                 var i = 0
                 while i < take and i < bytes_len(blk_data):
-                    bytes_push(result, bytes_get(blk_data, i))
+                    bytes_set(result, dst + i, bytes_get(blk_data, i))
                     i = i + 1
                 remaining = remaining - take
+                dst = dst + take
                 blk = blk + 1
-        let end = inode_obj.size
-        if bytes_len(result) > end:
-            let trimmed = bytes()
-            var i = 0
-            while i < end:
-                bytes_push(trimmed, bytes_get(result, i))
-                i = i + 1
-            result = trimmed
         if self.content_cache != nil:
             ## Bound it, so a workload touching many inodes cannot grow it without
             ## limit. Evicting the oldest key is crude but correct: correctness
