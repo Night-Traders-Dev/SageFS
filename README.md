@@ -39,7 +39,7 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 25/25 files, 647 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
+**Tests: 25/25 files, 654 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
 previously not running at all; see [Known issues](#known-issues) for what is
 still broken.
 
@@ -135,7 +135,7 @@ SageFS integrates Python-like readable and C-like performant SageLang to deliver
     against this implementation
   - No lock-free hot paths, no io_uring
 
-- **Development**: 25 test files, 647 assertions, 6 CLI tools
+- **Development**: 25 test files, 654 assertions, 6 CLI tools
 
 The binary image format uses little-endian encoding with 4 KiB blocks and 512
 blocks per segment. The B+ tree is the exception: its node magic and its keys
@@ -220,7 +220,7 @@ What is missing is a working session setup.
 ### Run Tests
 
 ```bash
-# Full test suite — 25 files, 647 assertions
+# Full test suite — 25 files, 654 assertions
 ./sagemake test
 
 # A single file
@@ -719,21 +719,14 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 *SageFS — Where flash performance meets data integrity.*
 
-**20. Renaming a directory that has children fails under the bytecode VM.**
-Fixed in the C backend, unfixed in the VM. `rename()` had two defects, both
-fixed: it re-inserted the moved entry as `DT_REG` unconditionally, so renaming a
-directory made `is_dir()` false and fsck reported the subtree below it as
-orphans; and it called `_get_dir()` once for the source parent and once for the
-destination, which decodes a *fresh* `DirManager` each time, so a rename within
-one directory operated on two independent copies — the removal went to one and
-the insertion to the other, and the save wrote the copy that had only had the
-removal applied, losing the file.
-
-What remains: renaming a directory that *has children*, then resolving it,
-raises "Arity mismatch" under the bytecode VM. It is not the aliasing — a
-minimal probe renaming an empty directory resolves fine in both runtimes — and
-it is not the cross-parent path, which is exercised and passes. The narrow
-characterisation is: rename succeeds, and the failure is on the subsequent
-`resolve_path()` of a renamed non-empty directory. The test file pins the cases
-that work in both runtimes and deliberately omits this one rather than turning
-the suite red.
+**20. ~~Renaming a directory that has children failed under the bytecode VM.~~
+Fixed — and the diagnosis was wrong twice.** Renaming a non-empty directory and
+then resolving it raised "Arity mismatch" in the bytecode VM, while the same
+code passed under the C backend. The C backend's own stderr for the failing
+build named the real cause: `rename()` was assigning `entry_type` from
+`target_ino` before `target_ino` existed, and the C backend reported that as
+"Undefined variable" while the VM reported it as an arity error. The differing
+message is what sent the investigation after `_get_dir()` aliasing and the
+bytecode VM specifically, when the defect was neither. Renaming empty
+directories, non-empty directories and cross-directory moves are all now pinned
+in `testing/test_sparse_and_rename.sage` and pass in both runtimes.

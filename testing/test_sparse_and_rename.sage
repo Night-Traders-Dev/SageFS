@@ -121,6 +121,24 @@ check("old name is gone", fs2.resolve_path("/movable"), -1)
 check("new name resolves", fs2.resolve_path("/renamed") > 0, true)
 check("renamed dir is still a directory", fs2.inode.get_inode(fs2.resolve_path("/renamed")).is_dir(), true)
 
+## A renamed directory that *has children*: the case that used to raise
+## "Arity mismatch" under the bytecode VM. It turned out to be the intermediate
+## rename() implementation referencing `target_ino` before it was assigned --
+## the C backend reported that as "Undefined variable" while the VM reported it
+## as an arity error, which sent the investigation after the aliasing first.
+## Pin it now that rename() is rewritten.
+check_true("mkdir /deep", fs2.mkdir("/deep"))
+check_true("mkdir /deep/inner", fs2.mkdir("/deep/inner"))
+let fdk = fs2.create_file("/deep/inner/leaf.txt", 577)
+fs2.write(fdk, bytes("leaf"))
+fs2.close(fdk)
+let deep_inner = fs2.resolve_path("/deep/inner")
+check_true("rename directory with children", fs2.rename("/deep", "/deep2"))
+check("renamed non-empty dir resolves", fs2.resolve_path("/deep2") > 0, true)
+check("child inode unchanged by rename", fs2.resolve_path("/deep2/inner"), deep_inner)
+check("grandchild still reachable", fs2.resolve_path("/deep2/inner/leaf.txt") > 0, true)
+check("grandchild content intact", read_byte(fs2, "/deep2/inner/leaf.txt", 0), ord("l"))
+
 check_true("mkdir /holder", fs2.mkdir("/holder"))
 let fdi = fs2.create_file("/holder/leaf.txt", 577)
 fs2.write(fdi, bytes("leaf"))
