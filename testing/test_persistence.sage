@@ -45,33 +45,36 @@ proc check_int(name: String, got: Int, expected: Int):
         print("  FAIL  " + name + "  got=" + str(got) + " expected=" + str(expected))
 
 proc make_image(dev: String) -> Bool:
+    ## Build a coherent image: serialise the superblock *after* setting
+    ## image_size, pad to the reserved extent, then write once.
+    ##
+    ## The previous version serialised first, padded, set image_size, and then
+    ## wrote the updated superblock back over offset 0. That happened to work, but
+    ## it meant the superblock the VFS mounts carried image_size = 0 whenever the
+    ## in-place overwrite did not take effect, and with no image size recorded
+    ## nothing bounded the buffer: it grew to the highest block ever touched
+    ## (the B+ tree root, then further), and unmount persisted the result. The
+    ## next mount then read a 17 MB "64 KB" image and the VM died copying it.
     let features: Dict = {"checksum_algo": superblock.CHECKSUM_CRC32C}
     let sb = superblock.create_superblock(4096, "Persist", 4096, 32, features)
-    let buf = sb.serialize()
     let bs: Int = sb.block_size
     let inode_area: Int = sb.inode_entry_start_blk * bs
+    let min_image: Int = inode_area + sb.inode_entry_byte_size
+    sb.image_size = min_image
+    let sb_bytes = sb.serialize()
+    var buf = bytes()
+    var k = 0
+    while k < bytes_len(sb_bytes):
+        bytes_push(buf, bytes_get(sb_bytes, k))
+        k = k + 1
     var pad = bytes_len(buf)
-    while pad < inode_area + 200:
+    while pad < min_image:
         bytes_push(buf, 0)
         pad = pad + 1
     let readme = "root\n"
     let S_IFREG: Int = 0x8000
     imgio.write_inode_entry_at(buf, inode_area, 2, S_IFREG | 0x1A4,
                                len(readme), "README.txt", readme)
-    let min_image: Int = sb.inode_entry_start_blk * sb.block_size + sb.inode_entry_byte_size
-    if bytes_len(buf) > min_image:
-        sb.image_size = bytes_len(buf)
-    else:
-        sb.image_size = min_image
-    var j = bytes_len(buf)
-    while j < sb.image_size:
-        bytes_push(buf, 0)
-        j = j + 1
-    let sb_bytes = sb.serialize()
-    var k = 0
-    while k < bytes_len(sb_bytes):
-        buf[k] = sb_bytes[k]
-        k = k + 1
     return imgio.write_image(dev, buf)
 
 ## A payload with a recognisable byte at every position, so truncation or a

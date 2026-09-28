@@ -946,14 +946,34 @@ class VFS:
         let bs = self._init_block_size()
         var result = bytes()
         for ext in extents:
-            var bi = 0
-            while bi < ext.length:
-                let blk_data = self._read_block(ext.block_addr + bi)
+            ## Walk whole blocks, taking only the bytes this extent covers.
+            ##
+            ## ext.length is a byte count, not a block count. This loop used to
+            ## iterate ext.length times and step the *block number* by one each
+            ## time, so an extent of 4096 bytes read 4096 consecutive blocks --
+            ## straight off the end of the volume. _read_block() materialises the
+            ## whole prefix for any address, so the image buffer grew to cover
+            ## block 4096 (one past total_blocks) and ran on past it, reaching
+            ## 17 MB. unmount() then persisted that length, and the next mount
+            ## read the oversized file back and the VM died copying it.
+            ##
+            ## It was masked for as long as extents falsely reported a length of
+            ## one byte: that meant a single block read, whose contents were then
+            ## trimmed to the inode size, which looked correct. Fixing the writer
+            ## to record real byte lengths exposed the reader's assumption.
+            var remaining = ext.length
+            var blk = ext.block_addr
+            while remaining > 0:
+                var take = bs
+                if remaining < bs:
+                    take = remaining
+                let blk_data = self._read_block(blk)
                 var i = 0
-                while i < bytes_len(blk_data):
+                while i < take and i < bytes_len(blk_data):
                     bytes_push(result, bytes_get(blk_data, i))
                     i = i + 1
-                bi = bi + 1
+                remaining = remaining - take
+                blk = blk + 1
         let end = inode_obj.size
         if bytes_len(result) > end:
             let trimmed = bytes()
