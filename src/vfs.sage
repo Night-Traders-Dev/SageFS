@@ -906,6 +906,18 @@ class VFS:
         if new_inode == nil:
             return false
         parent_dir.add_entry(name, new_inode.ino, dir_module.DT_DIR)
+        ## A directory's link count is 2 ("." plus its parent's entry) plus one
+        ## per subdirectory. create_inode() sets the new directory's own nlink
+        ## to 2, but nothing ever raised the *parent's* count, so every directory
+        ## carried a stale nlink and `fsck` flagged the link count as an error on
+        ## a perfectly healthy filesystem.
+        let parent_inode = self.inode.get_inode(parent_ino)
+        if parent_inode != nil:
+            parent_inode.nlink = parent_inode.nlink + 1
+            ## Mutating an inode in place does not mark it dirty. Without this the
+            ## new count lives only in memory: unmount persists the dirty set, so
+            ## the change was silently lost and the count reverted on remount.
+            self.inode.update_inode(parent_ino)
         self._save_dir(parent_ino, parent_dir)
         return true
 
@@ -971,7 +983,16 @@ class VFS:
             return false
         if not parent_dir.remove_entry(name):
             return false
+        ## Removing a subdirectory lowers its parent's count too, for the same
+        ## reason mkdir raises it.
+        let target_obj = self.inode.get_inode(target_ino)
+        let was_dir: Bool = target_obj != nil and target_obj.is_dir()
         self.inode.unlink(target_ino)
+        if was_dir:
+            let parent_inode = self.inode.get_inode(parent_ino)
+            if parent_inode != nil and parent_inode.nlink > 2:
+                parent_inode.nlink = parent_inode.nlink - 1
+                self.inode.update_inode(parent_ino)
         ## The inode is gone; any cached content for it must not survive, and the
         ## number can be reused for a new file.
         self._invalidate_content(target_ino)

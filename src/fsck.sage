@@ -53,6 +53,7 @@ let ISSUE_BLOCK_CHECKSUM: Int = 7     # data/metadata block checksum mismatch
 import sys
 import superblock
 import fsimage
+import dir as dir_module
 
 class FsckIssue:
     proc init(self, code: Int, severity: Int, target: Int, message: String):
@@ -88,7 +89,12 @@ class FsckReport:
         self.repaired_count = 0
 
     proc add(self, issue: FsckIssue):
-        self.issues.push(issue)
+        ## Lists in this runtime are appended with the global push(list, value),
+        ## not a method call. `self.issues.push(issue)` raised "'.push' is not
+        ## callable" the first time fsck found *any* issue -- so the checker
+        ## crashed on precisely the input it exists to report, and a volume with
+        ## no issues looked fine only because add() was never reached.
+        push(self.issues, issue)
         if issue.repaired:
             self.repaired_count = self.repaired_count + 1
 
@@ -227,42 +233,63 @@ class Fsck:
     proc check_inode_tree(self, report: FsckReport):
         if self.inodes == nil:
             return
-        ## Walk reachable inodes from the root and tally directory references.
-        ## `reachable[ino] = observed reference count`.
-        var reachable: Dict[Int, Int] = {}
+        ## `refs[ino]` counts directory entries that name this inode -- the true
+        ## number of links to a file, and 0 for the root, which nothing names.
+        ## `subdirs[ino]` counts a directory's immediate subdirectories.
+        ##
+        ## The old walk seeded the inode it started from with a count of 1, as
+        ## though something referenced the root, and then compared that tally
+        ## against nlink for every inode alike. Those are two different
+        ## quantities: a directory's nlink is 2 ("." and its parent's entry)
+        ## plus its subdirectory count, not the number of entries naming it. So
+        ## a healthy filesystem reported the root as having nlink=2 against 1
+        ## observed reference, and -- because nothing ever increments a parent's
+        ## nlink when a subdirectory is created -- every other directory too.
+        var refs: Dict[Int, Int] = {}
+        var subdirs: Dict[Int, Int] = {}
+        var visited: Dict[Int, Bool] = {}
         let root_ino: Int = self.sb.root_inode
-        self.walk(root_ino, reachable, report)
+        self.walk(root_ino, refs, subdirs, visited, report)
 
         ## Any inode the manager knows about but that we never reached is an
         ## orphan (leaked by an interrupted unlink, etc.).
         let all_inos: Array = self.inodes.list_inodes()
         for ino in all_inos:
             report.inodes_scanned = report.inodes_scanned + 1
-            if not dict_has(reachable, ino):
+            if not dict_has(visited, ino):
                 let iss: FsckIssue = FsckIssue(ISSUE_ORPHAN_INODE, SEV_WARN, ino, "inode not reachable from root")
                 if self.repair:
                     self.inodes.delete_inode(ino)
                     iss.repaired = true
                 report.add(iss)
                 continue
-            ## Link-count check.
+            ## Link-count check, per type.
             let inode: Any = self.inodes.get_inode(ino)
-            if inode != nil:
-                let observed: Int = reachable[ino]
-                if inode.nlink != observed:
-                    let iss2: FsckIssue = FsckIssue(ISSUE_LINK_COUNT, SEV_ERROR, ino, "nlink=" + str(inode.nlink) + " but observed refs=" + str(observed))
-                    if self.repair:
-                        inode.nlink = observed
-                        iss2.repaired = true
-                    report.add(iss2)
+            if inode == nil:
+                continue
+            var expected: Int = 0
+            if inode.is_dir():
+                expected = 2
+                if dict_has(subdirs, ino):
+                    expected = expected + subdirs[ino]
+            else:
+                if dict_has(refs, ino):
+                    expected = refs[ino]
+            if inode.nlink != expected:
+                let iss2: FsckIssue = FsckIssue(ISSUE_LINK_COUNT, SEV_ERROR, ino, "nlink=" + str(inode.nlink) + " but expected=" + str(expected))
+                if self.repair:
+                    inode.nlink = expected
+                    iss2.repaired = true
+                report.add(iss2)
 
-    proc walk(self, ino: Int, reachable: Dict[Int, Int], report: FsckReport):
-        ## Depth-first tree walk, counting how many times each inode is
-        ## referenced by a directory entry.
-        if dict_has(reachable, ino):
-            reachable[ino] = reachable[ino] + 1
-            return                      # already visited (hard link / cycle guard)
-        reachable[ino] = 1
+    proc walk(self, ino: Int, refs: Dict[Int, Int], subdirs: Dict[Int, Int],
+              visited: Dict[Int, Bool], report: FsckReport):
+        ## Depth-first descent from `ino`, recording how many directory entries
+        ## name each inode and how many subdirectories each directory has.
+        if dict_has(visited, ino):
+            return                      # already descended (hard link / cycle guard)
+        visited[ino] = true
+        subdirs[ino] = 0
 
         let inode: Any = self.inodes.get_inode(ino)
         if inode == nil:
@@ -271,11 +298,21 @@ class Fsck:
         if not inode.is_dir():
             return
 
-        ## Recurse into child entries.  The inode manager exposes directory
-        ## listing via the DirManager; we tolerate its absence gracefully.
+        ## read_dir_entries() returns DirEntry objects, not inode numbers. This
+        ## used to pass each entry straight to walk(), so the recursive call got a
+        ## DirEntry where it expected an Int: the visited set never matched, the
+        ## cycle guard never fired, and the issues that resulted were reported
+        ## against a DirEntry -- "target=<instance of DirEntry>: directory
+        ## references missing inode".
         let children: Array = self.inodes.read_dir_entries(ino)
-        for child_ino in children:
-            self.walk(child_ino, reachable, report)
+        for entry in children:
+            if dict_has(refs, entry.ino):
+                refs[entry.ino] = refs[entry.ino] + 1
+            else:
+                refs[entry.ino] = 1
+            if entry.file_type == dir_module.DT_DIR:
+                subdirs[ino] = subdirs[ino] + 1
+            self.walk(entry.ino, refs, subdirs, visited, report)
 
 
 ## ============================================================================

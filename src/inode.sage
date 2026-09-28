@@ -615,7 +615,17 @@ class InodeManager:
         ##   - nlink = 2 (for "." and "..")
         ##   - Inline dentry flag is set by default
         ##
-        ## This method must be called exactly once during mkfs.
+        ## This must be idempotent. VFS.init() calls create_root() on every
+        ## mount, and the body used to allocate a fresh nid and overwrite
+        ## self.inodes[ROOT_INO] with a new inode unconditionally -- discarding
+        ## the root's persisted state (its link count and its dentries) and
+        ## leaking a NAT nid per mount. The docstring already said this method
+        ## must be called exactly once during mkfs; making the body match that is
+        ## safer than trusting every future caller to remember.
+        let key: String = str(ROOT_INO)
+        if dict_has(self.inodes, key):
+            return self.inodes[key]
+
         let nid: Int = self.nat_table.allocate_nid()
 
         ## 0o755 = 0x1ED in hexadecimal = 493 decimal
@@ -628,7 +638,6 @@ class InodeManager:
         ## so a future change to either constant cannot reintroduce the collision.
         self.note_inode(ROOT_INO)
 
-        let key: String = str(ROOT_INO)
         self.inodes[key] = root
         self.dirty_inodes[key] = true
 
