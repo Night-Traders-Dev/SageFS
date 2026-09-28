@@ -39,7 +39,7 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 22/22 files, 554 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
+**Tests: 23/23 files, 585 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
 previously not running at all; see [Known issues](#known-issues) for what is
 still broken.
 
@@ -135,7 +135,7 @@ SageFS integrates Python-like readable and C-like performant SageLang to deliver
     against this implementation
   - No lock-free hot paths, no io_uring
 
-- **Development**: 22 test files, 554 assertions, 6 CLI tools
+- **Development**: 23 test files, 585 assertions, 6 CLI tools
 
 The binary image format uses little-endian encoding with 4 KiB blocks and 512
 blocks per segment. The B+ tree is the exception: its node magic and its keys
@@ -220,7 +220,7 @@ What is missing is a working session setup.
 ### Run Tests
 
 ```bash
-# Full test suite — 22 files, 554 assertions
+# Full test suite — 23 files, 585 assertions
 ./sagemake test
 
 # A single file
@@ -491,9 +491,38 @@ and both previously invisible:
 
 `testing/test_extent_resize.sage` covers all three (28 assertions).
 
-**9. The node cache is never invalidated on write.** `VFS.write()` does not drop
-the cached entry, so read-write-read of a block-mapped file can return stale
-content.
+**9. ~~The node cache is never invalidated on write.~~ Fixed — and it was much
+worse than "stale reads".** `read_inode_data()` cached an inode's content in
+`CacheManager.get_node()`/`put_node()`, which is a *block address* cache, so file
+content was filed under an inode number in the same map `invalidate_node()`
+treats as block addresses. Nothing ever invalidated it, so a read after a write
+returned the pre-write content. Verified before fixing: rewriting a file and
+reading it back still returned the original bytes.
+
+Content caching now lives in its own bounded dict, and every path that changes
+what `read_inode_data()` would return — `write()`, `truncate()`, `unlink()` —
+calls `_invalidate_content()`. Chasing this surfaced four more write-path bugs,
+all data loss, all now fixed:
+
+- **A small write to a large file destroyed it.** The inline/block decision was
+  `is_inline() or new_size <= INLINE_DATA_MAX`, so a 16-byte edit at offset 0 of
+  an 8192-byte block-mapped file took the inline path, rewrote the file as inline
+  data, and set `size = len(new_data) == 16`. The other 8178 bytes were gone.
+  Storage class now depends on the file's current state, not the write's size.
+- **In-place writes allocated new blocks.** The block path allocated a fresh
+  block for every chunk of every write, even writes wholly inside existing data,
+  orphaning the block that held the rest of the file. It now consults
+  `lookup_extent()` and writes into the block already mapped there.
+- **A write could shrink a file.** `size` was assigned `f.pos + written`
+  unconditionally, so an edit inside existing data truncated the file to the
+  edit's length. Size now only grows.
+- **Zero-length files were never persisted.** `_persist_all()` skipped inodes
+  with no inline data and `size == 0`, so `truncate(path, 0)` — or creating an
+  empty file — left nothing in the inode area and the file did not survive a
+  remount.
+
+`testing/test_content_cache.sage` covers all of it (31 assertions), including
+that a re-created file does not inherit a recycled inode's cached bytes.
 
 **10. SIT region sizing.** `segment.sage` declares `SIT_ENTRY_SIZE = 72` while
 `superblock.sage` sizes the region with `sit_entry_size = 64`, allocating the
@@ -525,11 +554,17 @@ halves were wrong. `testing/test_persistence.sage` now checks each file against
 its own contents on the third mount, and asserts that a read-only open with
 `O_TRUNC` set leaves the data intact.
 
-**14. `VFS` exposes no `truncate` or `punch_hole`.** Both exist on `ExtentTree`
-and now work, but nothing on the filesystem API reaches them, so a file cannot
-actually be shrunk or have blocks released through VFS. `truncate()` also only
-fixes the extent map — it does not update the inode's `size`, so a VFS-level
-truncate would need both halves.
+**14. `VFS` exposes no `punch_hole`.** `VFS.truncate()` has been added and
+updates both halves — the extent map via `ExtentTree.truncate()` and the inode's
+`size` — refusing to grow rather than zero-filling bytes that were never written.
+`punch_hole()` still only exists on `ExtentTree`, so blocks cannot be released
+through the filesystem API, and `ExtentTree.punch_hole()` still requires a
+block-aligned range because extents are block-granular.
+
+**15. A write to a block-mapped file now works in place.** This was folded into
+issue 9 above rather than listed separately: before the fix, *any* in-place
+modification of a block-mapped file silently destroyed the parts it did not
+touch.
 
 **13. Inode metadata is capped by a fixed 32 KiB reserved area.** Every inode's
 metadata is stored as hex text in a fixed 8-block area at block 8, and the area

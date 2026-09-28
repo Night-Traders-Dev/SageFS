@@ -354,6 +354,19 @@ class VFS:
         self.mounted = true
         self.ino_path_cache = {}
         self.cache_ino_path(ROOT_INO, "/")
+        ## Inode content cache, keyed by inode number.
+        ##
+        ## read_inode_data() used to borrow CacheManager.get_node()/put_node(),
+        ## which is a *block address* cache -- so file content was filed under an
+        ## inode number in the same map that invalidate_node() treats as block
+        ## addresses. Worse, nothing ever invalidated it, so a read after a write
+        ## returned the content from before that write. Verified: rewriting a file
+        ## and reading it back still returned the original bytes.
+        ##
+        ## Keeping it separate removes the stale read and the conflated key space.
+        ## Every path that changes an inode's content must call
+        ## _invalidate_content().
+        self.content_cache = {}
         return true
 
     ## ino_path_cache — reverse map ino → cached path for FUSE operations
@@ -408,7 +421,10 @@ class VFS:
             if inode_obj == nil:
                 continue
             let data_str: String = inode_obj.get_inline_data()
-            if len(data_str) > 0 or inode_obj.size > 0:
+            ## A zero-length file still has to be written. It used to be skipped,
+            ## so truncate-to-0 (or creating an empty file) left nothing in the
+            ## inode area and the file did not survive a remount.
+            if len(data_str) > 0 or inode_obj.size >= 0:
                 ## Never write past the reserved area.
                 ##
                 ## The area is a fixed 8 blocks and ends exactly where the journal
@@ -704,7 +720,22 @@ class VFS:
         if written == 0:
             return 0
         let new_size = f.pos + written
-        if inode_obj.is_inline() or new_size <= inode_module.INLINE_DATA_MAX:
+        ## Storage class is decided by the file's current state, not by the size of
+        ## this particular write.
+        ##
+        ## The test used to be `is_inline() or new_size <= INLINE_DATA_MAX`, so a
+        ## 16-byte write at offset 0 of an 8192-byte block-mapped file took the
+        ## inline path: the file was rewritten as inline data and its size was
+        ## set to len(new_data) == 16. The other 8178 bytes were gone, and
+        ## read_inode_data() afterwards returned 16 bytes. Any small edit to a
+        ## large file destroyed it.
+        ##
+        ## A file that already has extents stays block-mapped; a file with no
+        ## extents yet may still become inline if it is small.
+        var has_extents = false
+        if self.extent != nil:
+            has_extents = len(self.extent._collect_extents(f.ino)) > 0
+        if inode_obj.is_inline() or (not has_extents and new_size <= inode_module.INLINE_DATA_MAX):
             let current = inode_obj.get_inline_data()
             var new_data = ""
             var i = 0
@@ -720,6 +751,7 @@ class VFS:
                 i = i + 1
             inode_obj.set_inline_data(new_data)
             inode_obj.size = len(new_data)
+            self._invalidate_content(f.ino)
         else:
             ## Spread the write across as many blocks as it needs.
             ##
@@ -738,34 +770,75 @@ class VFS:
                 let chunk_len = bs
                 if written - placed < bs:
                     chunk_len = written - placed
-                let alloc_info = self._alloc_block_addr("warm")
-                if alloc_info == nil:
-                    failed = true
-                    break
-                let phys_blk = alloc_info["physical_blk"]
+                ## Overwrite in place when the target offset is already mapped.
+                ##
+                ## This loop used to allocate a fresh block for every chunk of
+                ## every write, including writes wholly inside existing data. A
+                ## 16-byte edit at offset 0 of an 8192-byte file therefore
+                ## allocated a new block, wrote 16 bytes into it, and recorded an
+                ## extent of 16 -- orphaning the block that held the other 8178
+                ## bytes, which were then gone. Any in-place modification of a
+                ## block-mapped file silently destroyed the rest of it.
+                ##
+                ## Now the extent covering this offset is consulted first, and the
+                ## chunk is written into the block that already holds those bytes.
+                ## A block is only allocated when the write extends past the last
+                ## mapped byte.
+                let target_off = f.pos + placed
+                var phys_blk = -1
+                var allocated_new = false
+                let existing = self.extent.lookup_extent(f.ino, target_off)
+                if existing != nil:
+                    ## Which block inside that extent does this offset land in?
+                    let off_in_ext = target_off - existing.file_offset
+                    phys_blk = existing.block_addr + int(off_in_ext / bs)
+                    ## Only the first `bs - (off_in_ext % bs)` bytes of that block
+                    ## belong to the extent, so cap the chunk there.
+                    let room = bs - (off_in_ext % bs)
+                    if room < chunk_len:
+                        chunk_len = room
+                if phys_blk < 0:
+                    let alloc_info = self._alloc_block_addr("warm")
+                    if alloc_info == nil:
+                        failed = true
+                        break
+                    phys_blk = alloc_info["physical_blk"]
+                    allocated_new = true
                 let chunk = bytes()
                 var c = 0
                 while c < chunk_len:
                     bytes_push(chunk, bytes_get(data, placed + c))
                     c = c + 1
                 self._write_block(phys_blk, chunk)
-                ## Length is in bytes, not blocks: end_offset() is
-                ## file_offset + length, so passing 1 described every extent as
-                ## covering a single byte. An 8192-byte file came out as two
-                ## extents of length 1 rather than one of 8192, which left the
-                ## extent map -- the authoritative description of a file's block
-                ## layout -- wrong for every block-mapped file. read_inode_data()
-                ## masked it by walking block_addr and the inode size rather than
-                ## the extents, so reads looked fine while truncate(), punch_hole()
-                ## and anything else reasoning about extents saw nonsense.
-                self.extent.insert_extent(f.ino, f.pos + placed, phys_blk, chunk_len)
+                ## Only a freshly allocated block needs an extent. Writing in
+                ## place leaves the existing extent, which still describes the
+                ## whole block correctly -- re-inserting it with this chunk's
+                ## length replaced a 4096-byte extent with a 16-byte one, so the
+                ## rest of that block stopped being covered and the file lost the
+                ## bytes beyond the edit as soon as it was remounted.
+                if allocated_new:
+                    ## Length is in bytes, not blocks: end_offset() is
+                    ## file_offset + length, so passing 1 described every extent as
+                    ## covering a single byte. An 8192-byte file came out as two
+                    ## extents of length 1 rather than one of 8192, which left the
+                    ## extent map -- the authoritative description of a file's
+                    ## block layout -- wrong for every block-mapped file.
+                    self.extent.insert_extent(f.ino, f.pos + placed, phys_blk, chunk_len)
                 placed = placed + chunk_len
             if failed:
                 self.txmgr.abort()
                 return -1
-            inode_obj.size = new_size
+            ## A write can only extend a file, never shrink it. `new_size` is
+            ## f.pos + written, so assigning it directly truncated the file
+            ## whenever a write was wholly inside existing data -- a 16-byte edit
+            ## at offset 0 of an 8192-byte file left it 16 bytes long even though
+            ## the underlying blocks still held the other 8178.
+            if new_size > inode_obj.size:
+                inode_obj.size = new_size
             self.txmgr.commit()
         self.inode.update_inode(f.ino)
+        ## The cached copy of this inode's content is now wrong.
+        self._invalidate_content(f.ino)
         f.pos = f.pos + written
         return written
 
@@ -876,6 +949,31 @@ class VFS:
         push(self.fds, FileDescriptor(file_inode.ino, flags, 0))
         return fd
 
+    ## Truncate a file to `size` bytes, updating both the extent map and the
+    ## inode. ExtentTree.truncate() fixes the block map; on its own the inode size
+    ## still claimed the old length, so stat() and the read path disagreed with
+    ## the data actually on disk.
+    proc truncate(self, path: String, size: Int) -> Bool:
+        let ino: Int = self.resolve_path(path)
+        if ino == -1:
+            return false
+        if size < 0:
+            return false
+        let inode_obj = self.inode.get_inode(ino)
+        if inode_obj == nil:
+            return false
+        if size > inode_obj.size:
+            ## Growing is not supported: there is no block to grow into, and
+            ## silently zero-filling would hand the caller data that was never
+            ## written. Refuse rather than pretend.
+            return false
+        if self.extent != nil:
+            self.extent.truncate(ino, size)
+        inode_obj.size = size
+        self.inode.update_inode(ino)
+        self._invalidate_content(ino)
+        return true
+
     proc unlink(self, path: String) -> Bool:
         let pinfo = self._lookup_in_parent(path)
         let parent_ino = pinfo["parent_ino"]
@@ -891,6 +989,9 @@ class VFS:
         if not parent_dir.remove_entry(name):
             return false
         self.inode.unlink(target_ino)
+        ## The inode is gone; any cached content for it must not survive, and the
+        ## number can be reused for a new file.
+        self._invalidate_content(target_ino)
         self._save_dir(parent_ino, parent_dir)
         return true
 
@@ -931,15 +1032,24 @@ class VFS:
             self._save_dir(new_parent, new_dir)
         return true
 
+    ## Drop a cached copy of an inode's content. Called by every path that
+    ## changes what read_inode_data() would return.
+    proc _invalidate_content(self, ino: Int):
+        if self.content_cache == nil:
+            return
+        if dict_has(self.content_cache, str(ino)):
+            dict_delete(self.content_cache, str(ino))
+
     proc read_inode_data(self, ino: Int) -> Bytes:
         let inode_obj = self.inode.get_inode(ino)
         if inode_obj == nil:
             return bytes()
         if inode_obj.is_inline():
             return bytes(inode_obj.get_inline_data())
-        let cached = self.cache.get_node(ino)
-        if bytes_len(cached) > 0:
-            return cached
+        if self.content_cache != nil and dict_has(self.content_cache, str(ino)):
+            let hit = self.content_cache[str(ino)]
+            if bytes_len(hit) > 0:
+                return hit
         let extents = self.extent._collect_extents(ino)
         if len(extents) == 0:
             return bytes()
@@ -982,7 +1092,14 @@ class VFS:
                 bytes_push(trimmed, bytes_get(result, i))
                 i = i + 1
             result = trimmed
-        self.cache.put_node(ino, result)
+        if self.content_cache != nil:
+            ## Bound it, so a workload touching many inodes cannot grow it without
+            ## limit. Evicting the oldest key is crude but correct: correctness
+            ## does not depend on what stays cached, only on _invalidate_content()
+            ## being called on every write.
+            if len(dict_keys(self.content_cache)) >= 256:
+                dict_delete(self.content_cache, dict_keys(self.content_cache)[0])
+            self.content_cache[str(ino)] = result
         return result
 
     proc write_block(self, blk: Int, data: Bytes):
