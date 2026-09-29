@@ -799,3 +799,43 @@ the search died on a property access rather than reporting that there was nothin
 to find. `search()` now returns "no such key" when an internal node has no child
 pointers, and clamps the child index into range. The same input previously took
 down the filesystem on the next lookup.
+
+**13. Inode metadata is capped by a fixed 32 KiB reserved area.** Every inode's
+metadata is hex text written sequentially into a fixed region — 8 blocks
+(`inode_entry_start_blk` 8, `INODE_ENTRY_RESERVED_BLKS` 8, i.e. 32 KiB at 4 KiB
+blocks) sitting between the checkpoint packs and the journal. `_persist_all()`
+walks the inode table at unmount and appends each entry at the running offset;
+`imgio.read_inode_entries_from_area()` parses them back on mount. There is no
+indirection, so the table cannot grow: the area is the ceiling. Directory entries
+are separately capped at `MAX_INLINE_DENTRIES` = 200, and inline file data at
+`INLINE_DATA_MAX`. The area is bounded on write precisely because
+`write_inode_entry_at()` does no bounds checking of its own and will happily grow
+the image and write past the region.
+
+Not yet fixed. The design, worked out:
+
+- **The superblock does not need to grow.** Bytes 92–383 are unused — the last
+  field before them is `main_start_blk` at 84 and the next is `flags` at 384 —
+  so `inode_root_blk` (LE64 @ 92) and `inode_root_generation` (LE64 @ 100) fit in
+  existing padding. A v1.5 header is therefore additive, with no resize of
+  `SUPERBLOCK_HEADER_SIZE` and no change to the magic or the checksum placement.
+- **Reuse the B+ tree rather than inventing a second index.** The extent tree is
+  already block-backed, already survives remount via `extent_root_blk`, and
+  already has working COW, split and predecessor search. An inode table keyed by
+  inode number in a `BTreeEngine` gets all of that for free, and shares the
+  allocator the volume already has.
+- **`_persist_all()`** becomes "serialize every dirty inode and insert it under
+  its inode number", and mount reads them back by walking the tree from
+  `sb.inode_root_blk` instead of parsing the area. The dirty set
+  (`InodeManager.get_dirty_inodes()`) already exists and is already maintained,
+  so this also stops rewriting every inode on every unmount.
+- **The reserved area becomes a v1.4 fallback**, gated on `version_minor < 5`, so
+  existing images still mount. A v1.5 image with a corrupt or missing inode root
+  should fall back to the area if it is non-empty, and otherwise come up empty
+  rather than refusing to mount.
+
+This is a real format change and should be done as one piece with the superblock,
+`VFS`, `InodeManager` and image building all updated together, plus regenerated
+test images. It has not been started, deliberately: landing a half-finished
+on-disk format change is much worse than leaving the current one working and
+documented.
