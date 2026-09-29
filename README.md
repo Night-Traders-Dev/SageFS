@@ -781,7 +781,24 @@ extent (several `nil`); the `MAX_EXTENT_LEN` cases, which come out capped at
 where one expected block address is off. The production extent path is not in
 doubt: the write, truncate, punch_hole and remount suites all exercise it.
 
-**22. A root block of zeros crashed the B-tree instead of reading as empty.**
+**22. Appended extents never merged.** Fixed. `insert_extent()` decided whether to
+merge with the extent on the left by asking `_search_ge()` for the item before the
+insertion point, but `_search_ge()` returns the first item with a key *greater than
+or equal to* the search key, and `nil` when the key is past every item in the tree
+— which is exactly the case when a new extent is written past the end of a file.
+So on every append there was no candidate at all and adjacent extents were never
+merged. A new `_search_le()` finds the predecessor, descending to the leaf that
+would hold the key and, when the insertion point is that leaf's start, walking up
+the path to the previous leaf.
+
+The existing merge tests all passed because they inserted in the *middle*, where
+`_search_ge()` had a successor to return. The cost was not cosmetic: a file built
+by repeated appends grew one extent per write instead of merging them, so a GiB
+written in 4 KiB chunks accumulated 262144 extents of 24 bytes plus keys in the
+B+ tree, and `MAX_EXTENT_LEN` never capped anything. Caught by the rebuilt extent
+harness, in `test_merge_up_to_max_len`.
+
+**23. A root block of zeros crashed the B-tree instead of reading as empty.**
 Fixed. `BTreeEngine.search()` walked `while not current.is_leaf`, and a root
 block of zeros — a freshly formatted volume, or damaged metadata —
 deserialises with `is_leaf = false`, no items and no pointers. The index

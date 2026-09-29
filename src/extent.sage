@@ -81,6 +81,56 @@ class ExtentTree:
     ## Find the first leaf item with key >= given key.
     ## Returns SearchGeResult or nil. Traverses the tree with path tracking
     ## to scan across leaf boundaries.
+    proc _search_le(self, key: btree.BTreeKey) -> Dict:
+        ## Find the last item whose key is strictly less than `key`, returning
+        ## {"leaf": leaf, "idx": index} or nil if there is none.
+        ##
+        ## _search_ge() cannot answer this. It returns the first item with a key >=
+        ## the search key, and nil when the key is past every item in the tree --
+        ## which is exactly the situation when a new extent is appended past the
+        ## end of a file. That made insert_extent()'s left-merge unreachable for
+        ## appends, so two physically and logically adjacent extents never merged
+        ## when the second was written past the end of the file. The merge tests
+        ## that passed all inserted in the middle, where a successor existed for
+        ## _search_ge() to return.
+        ##
+        ## The cost of that is not cosmetic: a file built by repeated appends
+        ## accumulated one extent per write instead of merging them, so a GiB
+        ## written in 4 KiB chunks grew 262144 extents of 24 bytes plus keys in
+        ## the B+ tree, and MAX_EXTENT_LEN never got a chance to cap anything.
+        if self.btree.root_block == 0:
+            return nil
+
+        var path = []
+        var node = self.btree.read_node(self.btree.root_block)
+        while not node.is_leaf:
+            var idx = node.search(key)
+            if idx >= node.num_items:
+                idx = node.num_items - 1
+            elif idx > 0 and node.pointers[idx].key.compare(key) > 0:
+                idx = idx - 1
+            if idx < 0 or idx >= len(node.pointers):
+                return nil
+            push(path, [node, idx])
+            node = self.btree.read_node(node.pointers[idx].block_addr)
+
+        ## node is the leaf that would hold the key. The predecessor is the item
+        ## before the insertion point, unless the insertion point is the start of
+        ## this leaf, in which case it is the last item of the previous leaf.
+        var pos = node.search(key)
+        if pos > 0:
+            return {"leaf": node, "idx": pos - 1}
+        while len(path) > 0:
+            let entry = pop(path)
+            let parent = entry[0]
+            let child_idx = entry[1]
+            if child_idx - 1 < 0:
+                continue
+            let prev_leaf = self.btree.read_node(parent.pointers[child_idx - 1].block_addr)
+            if prev_leaf.num_items > 0:
+                return {"leaf": prev_leaf, "idx": prev_leaf.num_items - 1}
+        return nil
+
     proc _search_ge(self, key: btree.BTreeKey):
         if self.btree.root_block == 0:
             return nil
@@ -183,13 +233,18 @@ class ExtentTree:
 
         # Find and try left merge
         var merge_left = false
-        let left_ge = self._search_ge(self._key(ino, file_offset))
-        if left_ge != nil:
-            let leaf = left_ge.leaf
-            let idx = left_ge.idx
-            # Check item just before the found position
-            if idx > 0:
-                let prev_item = leaf.items[idx - 1]
+        ## Try the predecessor first. _search_ge() returns nil when the new
+        ## offset is past every stored extent -- the normal case for an append
+        ## -- and with that nil there was no candidate at all, so adjacent
+        ## extents never merged when written past the end of a file. The merge
+        ## tests that passed all inserted in the middle, where _search_ge() had a
+        ## successor to return. _search_le() finds the predecessor either way.
+        let prev_loc = self._search_le(self._key(ino, file_offset))
+        if prev_loc != nil:
+            let leaf = prev_loc["leaf"]
+            let idx = prev_loc["idx"]
+            if idx >= 0 and idx < leaf.num_items:
+                let prev_item = leaf.items[idx]
                 if prev_item.key.object_id == ino and prev_item.key.type == EXTENT_ITEM:
                     let left_ext = extent_from_bytes(self._read_data(leaf, prev_item))
                     if left_ext.end_offset() == file_offset and left_ext.block_addr + left_ext.length == block_addr:
