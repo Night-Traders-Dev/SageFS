@@ -39,7 +39,7 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 26/26 files, 712 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
+**Tests: 27/27 files, 745 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
 previously not running at all; see [Known issues](#known-issues) for what is
 still broken.
 
@@ -135,7 +135,7 @@ SageFS integrates Python-like readable and C-like performant SageLang to deliver
     against this implementation
   - No lock-free hot paths, no io_uring
 
-- **Development**: 26 test files, 712 assertions, 6 CLI tools
+- **Development**: 27 test files, 745 assertions, 6 CLI tools
 
 The binary image format uses little-endian encoding with 4 KiB blocks and 512
 blocks per segment. The B+ tree is the exception: its node magic and its keys
@@ -220,7 +220,7 @@ What is missing is a working session setup.
 ### Run Tests
 
 ```bash
-# Full test suite — 26 files, 712 assertions
+# Full test suite — 27 files, 745 assertions
 ./sagemake test
 
 # A single file
@@ -865,6 +865,21 @@ pre-existing field offset moved. `test_superblock.sage` (16 assertions) checks
 the raw bytes at the two new offsets, that a maximum-length label does not
 overwrite them, that both are covered by the superblock checksum, and that a
 v1.4 image with zeros there still parses.
+
+Also done: inode metadata now has a single on-disk codec.
+`imgio.encode_inode_entry()` and `imgio.decode_inode_entry()` are the only
+encoder and decoder for the 16-byte header, and both the v1.4 area writer and
+reader go through them. A v1.5 tree value is therefore byte-identical to what
+the area would have stored, so migrating between the two is a straight copy
+rather than a re-encoding, and the two readers cannot drift apart the way two
+hand-written parsers can. `test_inode_codec.sage` (33 assertions) checks the
+header at each documented offset with values exceeding 8 and 16 bits — a writer
+that truncated `ino` or `mode` to a single byte passes every test that only uses
+ino 1 and mode 0o644 — and asserts the area writer is byte-identical to the
+codec. The area scan is now bounded by the buffer length as well as the declared
+area: it previously checked only the area end, which on a real image was harmless
+because the bytes past the last entry are zero padding, but read past the end of
+a short buffer and produced nil fields.
 
 Not yet done: the inode B+ tree itself, the `_persist_all` and mount-loader
 swap, and the `version_minor` bump to 1.5. The version is deliberately still 1.4
