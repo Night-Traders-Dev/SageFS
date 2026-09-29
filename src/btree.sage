@@ -384,11 +384,23 @@ class BTreeEngine:
         var curr_node = self.read_node(self.root_block)
 
         while curr_node.is_leaf == false:
+            ## An internal node with no child pointers is not a tree. A root
+            ## block of zeros -- a freshly formatted volume, or metadata that has
+            ## been damaged -- deserialises with is_leaf = false, no items and no
+            ## pointers, and the arithmetic below walked off the end: idx came out
+            ## as num_items - 1 == -1, pointers[-1] was nil, and the search died on
+            ## a property access instead of reporting that there is nothing to
+            ## find. Treat it as empty, so damaged metadata reads as "no such key"
+            ## rather than crashing the filesystem on the next lookup.
+            if len(curr_node.pointers) == 0:
+                return bytes()
             var idx = curr_node.search(key)
             if idx == curr_node.num_items:
                 idx = curr_node.num_items - 1
-            elif idx > 0 and curr_node.pointers[idx].key.compare(key) > 0:
+            elif idx > 0 and idx < len(curr_node.pointers) and curr_node.pointers[idx].key.compare(key) > 0:
                 idx = idx - 1
+            if idx < 0 or idx >= len(curr_node.pointers):
+                return bytes()
             curr_node = self.read_node(curr_node.pointers[idx].block_addr)
 
         let idx = curr_node.search(key)

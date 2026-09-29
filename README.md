@@ -741,24 +741,36 @@ Confirmed by mutation: changing an expected block address from 100 to 999 left
 every test reporting `PASS` and the banner unchanged.
 
 Replacing the assertions with real comparisons immediately exposed how much was
-hidden: **39 of the 55 were failing.** All of them read `got=nil`, because the
-harness builds its B-tree at `BTreeEngine(alloc, 0, 1)` — root block 0, which the
-B-tree treats as the empty sentinel. Every insert landed nowhere and every
-lookup returned nothing. The file has been asserting the wrong values against an
-empty tree and passing.
+hidden: **39 of the 55 were failing**, all reading `got=nil`.
 
-A second harness defect sits behind the first: `MockAllocator.read_block()`
-returned an empty buffer for any address it had not been handed, while
-`VFS._read_block()` materialises the block on demand. With a real root block the
-B-tree asks for a node that does not exist yet and parses nothing.
+The cause is in the test's block source, not in the extent tree.
+`MockAllocator.alloc_block()` returned `len(self.blocks) - 1`, so the **first
+block it ever handed out was block 0** — and block 0 is the B-tree's "no tree
+yet" sentinel, which `BTreeEngine.search()` and `insert()` both special-case with
+`if self.root_block == 0`. The engine lazily created its root on that block,
+`root_block` stayed 0, and every subsequent search short-circuited to "no such
+key" forever. So the tree never held anything and every lookup returned nothing.
 
-The production path is fine — `insert_extent()` is exercised heavily by the
-write, truncate, punch_hole and remount tests, all of which pass. What is missing
-is a faithful standalone mock of the B-tree's block interface: it needs on-demand
-materialisation, and the node/leaf-chain behaviour that `cow_node()` depends on
-when it allocates a new node and moves the root. That mock is the work, and it
-is not done, so this file is left as it was rather than shipped red.
+Note that `BTreeEngine(alloc, 0, 1)` is *correct* for a fresh tree: root block 0
+means uninitialised, and `insert()` allocates the real root on first use. The
+mock, not the root, was wrong. The mock also returned an empty buffer from
+`read_block()` for any address it had not been given, where
+`VFS._read_block()` materialises on demand.
 
-Reinstating it means: drop `std.testing`, use a local `eq()` that counts, make
-the per-proc result and the final banner depend on the counts, build the tree at
-a non-zero root, and materialise blocks on read.
+With a base-offset allocator (starting at 8, matching the VFS's `main_start_blk`),
+on-demand materialisation, and real assertions, **34 of the 55 pass** and 21
+still fail, the rest clustered around a second extent at the same offset and
+around `punch_hole` trimming. Finishing this needs the remaining divergence
+between the mock and the tree worked out.
+
+Because that is not done, the file is left as it was rather than shipped red.
+
+**22. A root block of zeros crashed the B-tree instead of reading as empty.**
+Fixed. `BTreeEngine.search()` walked `while not current.is_leaf`, and a root
+block of zeros — a freshly formatted volume, or damaged metadata —
+deserialises with `is_leaf = false`, no items and no pointers. The index
+arithmetic then produced `idx = num_items - 1 = -1`, `pointers[-1]` was nil, and
+the search died on a property access rather than reporting that there was nothing
+to find. `search()` now returns "no such key" when an internal node has no child
+pointers, and clamps the child index into range. The same input previously took
+down the filesystem on the next lookup.
