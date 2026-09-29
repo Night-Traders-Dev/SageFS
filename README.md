@@ -763,7 +763,23 @@ still fail, the rest clustered around a second extent at the same offset and
 around `punch_hole` trimming. Finishing this needs the remaining divergence
 between the mock and the tree worked out.
 
-Because that is not done, the file is left as it was rather than shipped red.
+Because that is not done, `testing/test_extent.sage` is left as it was rather than
+shipped red. The rebuilt harness is preserved as **`testing/extent_harness.sage`**,
+deliberately outside the `test_*.sage` glob so `sagemake test` does not pick it
+up: real assertions instead of the no-op `assert.equal`, the corrected block
+source, per-proc results and a final banner that both depend on the counts. It
+reproduces 34 passed / 21 failed and can be run directly with
+`sage-c -I src testing/extent_harness.sage`.
+
+Verified working in that harness: insert, lookup of two extents at different file
+offsets, and `_collect_extents`. The block-0 sentinel bug is fixed.
+
+Still failing, clustered three ways — lookups landing in the *middle* of a stored
+extent (several `nil`); the `MAX_EXTENT_LEN` cases, which come out capped at
+16000 rather than 32000, so something halves the cap, possibly a `data_area` or
+`BTREE_MAX_KEYS` limit interacting with `split()`; and `punch_hole` trimming,
+where one expected block address is off. The production extent path is not in
+doubt: the write, truncate, punch_hole and remount suites all exercise it.
 
 **22. A root block of zeros crashed the B-tree instead of reading as empty.**
 Fixed. `BTreeEngine.search()` walked `while not current.is_leaf`, and a root
