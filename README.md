@@ -819,11 +819,22 @@ Not yet fixed. The design, worked out:
   so `inode_root_blk` (LE64 @ 92) and `inode_root_generation` (LE64 @ 100) fit in
   existing padding. A v1.5 header is therefore additive, with no resize of
   `SUPERBLOCK_HEADER_SIZE` and no change to the magic or the checksum placement.
-- **Reuse the B+ tree rather than inventing a second index.** The extent tree is
-  already block-backed, already survives remount via `extent_root_blk`, and
-  already has working COW, split and predecessor search. An inode table keyed by
-  inode number in a `BTreeEngine` gets all of that for free, and shares the
-  allocator the volume already has.
+- **A separate B+ tree for the inode table, with its own root and generation.**
+  This was left open as a judgement call and is now decided, against the
+  alternative of sharing the extent tree's root: `docs/btree.md` states the CoW
+  B+ tree "backs directory entries, extent maps, extended-attribute indexes, and
+  snapshot trees", and snapshots work by cloning a tree root, which is O(1) only
+  while each index has an independent root. Putting inode metadata and extent
+  metadata under one root would make the two share a COW generation, so updating
+  any inode would copy the extent tree's root too, and a snapshot could not
+  capture the two at different generations. Separate roots also keep inode churn
+  from splitting extent nodes and vice versa, which matters because the whole
+  point of the hybrid is F2FS-style separation of concerns. The cost is one more
+  superblock field pair and one more tree to mount, which is cheap.
+  The machinery is the same code: `ExtentTree` and the inode table become two
+  instances of the same block-backed CoW B+ tree over the same allocator, so the
+  COW, split, remount and predecessor-search behaviour the extent tree already
+  has is reused rather than reimplemented.
 - **`_persist_all()`** becomes "serialize every dirty inode and insert it under
   its inode number", and mount reads them back by walking the tree from
   `sb.inode_root_blk` instead of parsing the area. The dirty set
