@@ -404,7 +404,16 @@ proc main():
         exit_code = 2
         return
 
-    let fsck: Fsck = Fsck(fs.sb, fs.inode, fs.nat, nil, nil, repair)
+    ## The segment manager, not the block allocator, is what carries the SIT:
+    ## get_entry() and get_segments_by_type() are the two things the checks below
+    ## call, and both live on SegmentManager. Passing nil here -- which is what
+    ## this did until now -- made check_nat_sit and check_sit_counts return
+    ## immediately, so fsck silently skipped every allocation-consistency check on
+    ## a filesystem that has a perfectly good SIT. It reported "clean" on an
+    ## image whose NAT and SIT disagreed.
+    ##
+    ## csum_tree is still nil: there is no checksum tree on the VFS to hand over.
+    let fsck: Fsck = Fsck(fs.sb, fs.inode, fs.nat, fs.segment, nil, repair)
     let report: FsckReport = fsck.run()
     report.print_report()
 

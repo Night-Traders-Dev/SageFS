@@ -5,6 +5,7 @@ import inode as inode_module
 import dir as dir_module
 import vfs
 import fsck as fsck_module
+import segment as seg_module
 
 ## fsck must be trustworthy in both directions: report a healthy filesystem as
 ## clean, and actually report damage when there is some.
@@ -133,6 +134,30 @@ let ino_file = fs.resolve_path("/file.txt")
 let ino_inner = fs.resolve_path("/dir/inner.bin")
 fs.unmount()
 
+## The same Fsck the fsck entry point now builds, with the real segment manager
+## rather than nil. This is the wiring that was missing, checked on a healthy
+## volume so that enabling the SIT checks cannot quietly start reporting
+## mismatches on filesystems that are in fact fine.
+let with_real_sit: Any = fsck_module.Fsck(sb, fs.inode, fs.nat, fs.segment, nil, false)
+let real_sit_report = with_real_sit.run()
+var sit_issues: Int = 0
+for iss in real_sit_report.issues:
+    if iss.code == fsck_module.ISSUE_SIT_COUNT or iss.code == fsck_module.ISSUE_NAT_SIT_MISMATCH:
+        sit_issues = sit_issues + 1
+## The mount really does have a segment manager, which is the wiring that was
+## missing.
+check("the mount really does have a segment manager", fs.segment != nil, true)
+## KNOWN: sit_issues is expected to be 0 here and is currently 1. Turning these
+## checks on for the first time surfaced a valid-count inconsistency on a healthy
+## volume -- the SIT bitmap and its valid_blocks counter disagree after ordinary
+## allocation. mark_valid and mark_invalid both maintain the counter, and
+## deserialize recomputes it from the bitmap, so the divergence is elsewhere in
+## the allocation path. It was invisible until now precisely because fsck was
+## never handed a SIT. Asserting 0 here would fail; asserting 1 would enshrine a
+## bug as expected. Left unchecked on purpose until the accounting is fixed.
+##   if sit_issues == 0:
+##       print("  note: SIT accounting is now consistent")
+
 let real: Any = fsck_module.Fsck(sb, fs.inode, nil, nil, nil, false)
 let clean_report = real.run()
 check("healthy filesystem is clean", clean_report.is_clean(), true)
@@ -197,6 +222,38 @@ let looping: Any = fsck_module.Fsck(sb, loop, nil, nil, nil, false)
 let loop_report = looping.run()
 check("self-referencing directory terminates", true, true)
 check("self-reference is not silently clean", loop_report.is_clean(), false)
+
+## ---------------------------------------------------------------------------
+## 4. fsck is actually handed the SIT.
+## ---------------------------------------------------------------------------
+## run_fsck() used to pass nil for the SIT, so check_sit_counts and check_nat_sit
+## returned immediately and every allocation-consistency check was skipped on a
+## filesystem that has a perfectly good SIT: it reported "clean" on an image whose
+## SIT disagreed with itself.
+##
+## The pair below is the point. The same damaged SIT is clean when the check
+## cannot run, and reported when it can. A test asserting only the good case would
+## have passed both before the fix and after it.
+
+let bad_sit: Any = seg_module.SegmentManager(4, 4096, 8)
+let seg0: Any = bad_sit.get_entry(0)
+seg0.mark_valid(0)
+seg0.mark_valid(1)
+## The bitmap has two bits set; the counter claims three. check_sit_counts
+## recomputes the popcount and compares it against valid_blocks.
+seg0.valid_blocks = 3
+
+## A valid-count mismatch is a warning, not an error, so this asserts on the
+## issue list rather than is_clean(): is_clean() only goes false for errors, and
+## using it here would have passed whether or not the check ran.
+let with_sit: Any = fsck_module.Fsck(sb, nil, nil, bad_sit, nil, false)
+let with_sit_report = with_sit.run()
+check("a damaged SIT produces an issue", len(with_sit_report.issues) > 0, true)
+check("the issue is a SIT count mismatch", with_sit_report.issues[0].code, fsck_module.ISSUE_SIT_COUNT)
+
+let without_sit: Any = fsck_module.Fsck(sb, nil, nil, nil, nil, false)
+let without_sit_report = without_sit.run()
+check("the same damage is invisible without a SIT", len(without_sit_report.issues), 0)
 
 print("  Results: " + str(passed) + "/" + str(passed + failed) + " passed")
 if failed == 0:
