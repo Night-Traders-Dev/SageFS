@@ -39,7 +39,7 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 25/25 files, 696 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
+**Tests: 26/26 files, 712 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
 previously not running at all; see [Known issues](#known-issues) for what is
 still broken.
 
@@ -135,7 +135,7 @@ SageFS integrates Python-like readable and C-like performant SageLang to deliver
     against this implementation
   - No lock-free hot paths, no io_uring
 
-- **Development**: 25 test files, 696 assertions, 6 CLI tools
+- **Development**: 26 test files, 712 assertions, 6 CLI tools
 
 The binary image format uses little-endian encoding with 4 KiB blocks and 512
 blocks per segment. The B+ tree is the exception: its node magic and its keys
@@ -220,7 +220,7 @@ What is missing is a working session setup.
 ### Run Tests
 
 ```bash
-# Full test suite — 25 files, 696 assertions
+# Full test suite — 26 files, 712 assertions
 ./sagemake test
 
 # A single file
@@ -817,7 +817,7 @@ Not yet fixed. The design, worked out:
 - **The superblock is full, and must be trimmed rather than resized.** Bytes
   92–383 look like padding between `main_start_blk` at 84 and `flags` at 384, but
   they are not: `uuid` occupies 92–127 and `label` occupies 128–383
-  (`MAX_LABEL_LEN` 256). The 480-byte header has no free bytes at all.
+  (`MAX_LABEL_LEN`, now 240). The 480-byte header had no free bytes at all.
   I previously reported 292 free bytes here by reading the offset gap between
   numeric fields and missing the two fixed-width strings in it. That was wrong and
   it changes the design.
@@ -857,8 +857,18 @@ Not yet fixed. The design, worked out:
   should fall back to the area if it is non-empty, and otherwise come up empty
   rather than refusing to mount.
 
-This is a real format change and should be done as one piece with the superblock,
-`VFS`, `InodeManager` and image building all updated together, plus regenerated
-test images. It has not been started, deliberately: landing a half-finished
-on-disk format change is much worse than leaving the current one working and
-documented.
+**In progress.** Done: `MAX_LABEL_LEN` is now 240, and `inode_root_blk` (LE64 @
+368) and `inode_root_generation` (LE64 @ 376) are wired through the superblock's
+init, checksum payload, serializer, deserializer, `to_dict` and `__str__`.
+`SUPERBLOCK_HEADER_SIZE` stays 480 and the checksum stays at 476, so no
+pre-existing field offset moved. `test_superblock.sage` (16 assertions) checks
+the raw bytes at the two new offsets, that a maximum-length label does not
+overwrite them, that both are covered by the superblock checksum, and that a
+v1.4 image with zeros there still parses.
+
+Not yet done: the inode B+ tree itself, the `_persist_all` and mount-loader
+swap, and the `version_minor` bump to 1.5. The version is deliberately still 1.4
+— claiming 1.5 before the tree exists would make the version lie to anyone
+reading the header, and the fallback gate is keyed on it. Until that lands,
+inode metadata is still read from and written to the 32 KiB area, and the new
+fields simply sit at zero.

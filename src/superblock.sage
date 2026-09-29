@@ -60,7 +60,7 @@ let CHECKPOINT_PACK1_OFFSET: Int = 8192
 let CHECKPOINT_PACK2_OFFSET: Int = 16384
 
 ## Maximum volume label length in bytes (UTF-8)
-let MAX_LABEL_LEN: Int = 256
+let MAX_LABEL_LEN: Int = 240
 
 # ---------------------------------------------------------------------------
 # Feature flags — stored as a bitfield in superblock.flags
@@ -396,6 +396,8 @@ class SageFSSuperblock:
         self.sit_start_blk = 0
         self.ssa_start_blk = 0
         self.main_start_blk = 0
+        self.inode_root_blk = 0
+        self.inode_root_generation = 0
 
         # -- identity / labeling --
         self.uuid = ""
@@ -490,6 +492,8 @@ class SageFSSuperblock:
         payload = payload + str(self.sit_start_blk)
         payload = payload + str(self.ssa_start_blk)
         payload = payload + str(self.main_start_blk)
+        payload = payload + str(self.inode_root_blk)
+        payload = payload + str(self.inode_root_generation)
         payload = payload + self.uuid
         payload = payload + self.label
         payload = payload + str(self.flags)
@@ -561,6 +565,10 @@ class SageFSSuperblock:
         ##   68-75   : sit_start_blk  (LE64)
         ##   76-83   : ssa_start_blk  (LE64)
         ##   84-91   : main_start_blk (LE64)
+        ##   92-127  : uuid (36 bytes, zero-padded)
+        ##   128-367 : label (MAX_LABEL_LEN = 240 bytes, zero-padded)
+        ##   368-375 : inode_root_blk (LE64) -- inode metadata B+ tree root, v1.5+
+        ##   376-383 : inode_root_generation (LE64) -- COW generation, v1.5+
         ##   92-127  : uuid           (36 bytes, zero-padded)
         ##   128-383 : label          (256 bytes, zero-padded)
         ##   384-387 : flags          (LE32)
@@ -603,6 +611,10 @@ class SageFSSuperblock:
         # -- strings (fixed-width, zero-padded) --
         write_bytes_padded(buf, self.uuid, 36)    # 92  (UUID is 36 chars)
         write_bytes_padded(buf, self.label, MAX_LABEL_LEN)  # 128
+
+        # -- inode metadata tree root (v1.5+) --
+        write_le64(buf, self.inode_root_blk)        # 368
+        write_le64(buf, self.inode_root_generation)  # 376
 
         # -- algorithm & feature selectors (32-bit) --
         write_le32(buf, self.flags)           # 384
@@ -676,6 +688,8 @@ class SageFSSuperblock:
         d["sit_start_blk"] = self.sit_start_blk
         d["ssa_start_blk"] = self.ssa_start_blk
         d["main_start_blk"] = self.main_start_blk
+        d["inode_root_blk"] = self.inode_root_blk
+        d["inode_root_generation"] = self.inode_root_generation
         d["uuid"] = self.uuid
         d["label"] = self.label
         d["flags"] = self.flags
@@ -713,6 +727,8 @@ class SageFSSuperblock:
         s = s + "  sit_start_blk:   " + str(self.sit_start_blk) + "\n"
         s = s + "  ssa_start_blk:   " + str(self.ssa_start_blk) + "\n"
         s = s + "  main_start_blk:  " + str(self.main_start_blk) + "\n"
+        s = s + "  inode_root_blk:  " + str(self.inode_root_blk) + "\n"
+        s = s + "  inode_gen:       " + str(self.inode_root_generation) + "\n"
         s = s + "  uuid:            " + self.uuid + "\n"
         s = s + "  label:           " + self.label + "\n"
         s = s + "  flags:           0x" + str(self.flags) + "\n"
@@ -749,6 +765,8 @@ proc deserialize_superblock(buf: Bytes) -> SageFSSuperblock:
     sb.main_start_blk   = read_le64(buf, 84)
     sb.uuid         = read_bytes_string(buf, 92, 36)
     sb.label        = read_bytes_string(buf, 128, MAX_LABEL_LEN)
+    sb.inode_root_blk        = read_le64(buf, 368)
+    sb.inode_root_generation  = read_le64(buf, 376)
     sb.flags        = read_le32(buf, 384)
     sb.checksum_algo  = read_le32(buf, 388)
     sb.compress_algo  = read_le32(buf, 392)
