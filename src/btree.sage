@@ -124,6 +124,15 @@ class BTreeNode:
         self.items = []
         self.pointers = []
         self.data_area = bytes()
+        ## Whether deserialize() found BTREE_MAGIC at offset 0. A node that
+        ## failed to deserialise still yields plausible-looking fields -- a zeroed
+        ## block reads as is_leaf false with no items and no pointers, which the
+        ## search and scan guards already read as "empty" -- so nothing about the
+        ## node's contents distinguishes damage from a legitimately empty tree.
+        ## This does, and the mount loader needs the difference: an inode tree
+        ## whose root block is unreadable has to fall back to the legacy area,
+        ## and one that is merely empty must not.
+        self.valid = false
 
     proc serialize(self) -> Bytes:
         let b = bytes()
@@ -161,6 +170,7 @@ class BTreeNode:
 
     proc deserialize(self, data: Bytes):
         let magic = read_be32(data, 0)
+        self.valid = (magic == BTREE_MAGIC)
         let flags = bytes_get(data, 4)
         self.is_leaf = (flags & 1) != 0
         self.level = read_le32(data, 5)
@@ -360,6 +370,9 @@ class BTreeEngine:
         self.allocator = allocator
         self.root_block = root_block
         self.current_generation = gen
+        ## Root block that was recorded but did not hold a node, kept so the
+        ## damage is visible after the tree has rebuilt itself over it.
+        self.damaged_root_block = 0
 
     proc read_node(self, block_addr: Int):
         let data = self.allocator.read_block(block_addr)
@@ -368,9 +381,48 @@ class BTreeEngine:
         node.deserialize(data)
         return node
 
+    proc root_is_readable(self) -> Bool:
+        ## True when the tree has a root and that root block really holds a
+        ## B-tree node.
+        ##
+        ## Distinct from count() == 0, which a damaged root also reports: a
+        ## zeroed or overwritten root block deserialises into a node that reads
+        ## as empty rather than failing, so the two cases are indistinguishable
+        ## from the contents alone. A caller deciding between "this index is
+        ## empty" and "this index is damaged and I have a fallback" needs the
+        ## difference, and only the magic can supply it.
+        if self.root_block == 0:
+            return false
+        return self.read_node(self.root_block).valid
+
     proc write_node(self, node):
         let data = node.serialize()
         self.allocator.write_block(node.block_addr, data)
+
+    proc needs_split(self, node) -> Bool:
+        ## Whether a node has outgrown what a single block can hold.
+        ##
+        ## Key count is only half the limit. A leaf's serialized size is its
+        ## header plus 32 bytes per item plus its data area, so one large value
+        ## among several small ones can leave a node well under BTREE_MAX_KEYS
+        ## and still past BTREE_NODE_SIZE. That was silently destructive: the
+        ## allocator's write_block copies at most one block, so an oversized
+        ## node lost everything past the boundary -- part of the item records and
+        ## the tail of the data area -- with no error, and the tree then reported
+        ## the full key count while search() returned nothing for the keys whose
+        ## bytes had been dropped. A root directory's dentry blob is enough to
+        ## do this, which is how the inode table found it; extent values are small
+        ## enough that it never came up there.
+        ##
+        ## A single item that does not fit is left alone: splitting cannot make it
+        ## smaller, and looping on it would not terminate. Storing a value larger
+        ## than a block needs an overflow chain, which this format does not have
+        ## yet.
+        if node.num_items > BTREE_MAX_KEYS:
+            return true
+        if node.num_items > 1 and bytes_len(node.serialize()) > BTREE_NODE_SIZE:
+            return true
+        return false
 
     proc cow_node(self, node):
         if node.generation == self.current_generation:
@@ -485,7 +537,21 @@ class BTreeEngine:
         return n
 
     proc insert(self, key, data: Bytes):
-        if self.root_block == 0:
+        if self.root_block == 0 or not self.root_is_readable():
+            ## A recorded root that does not hold a node is a dead index, and it
+            ## has to be treated as an empty tree rather than indexed into.
+            ## search() and scan() already read such a root as empty -- a zeroed
+            ## block deserialises to is_leaf false with no items and no
+            ## pointers -- so leaving insert() to walk it made the two disagree,
+            ## and the walk is the one that dies: with num_items 0 the child
+            ## index went to -1 and pointers[-1] was nil, so the first write after
+            ## a damaged root took the filesystem down at unmount. Starting a new
+            ## root matches what reads already reported and keeps the volume
+            ## writable; the damaged index's contents are lost, but they were
+            ## already unreadable.
+            if self.root_block != 0:
+                ## Keep the old block for debugging rather than reusing it.
+                self.damaged_root_block = self.root_block
             let root = BTreeNode()
             root.generation = self.current_generation
             root.block_addr = self.allocator.alloc_block()
@@ -514,7 +580,7 @@ class BTreeEngine:
 
         current.insert(key, data)
 
-        while current.num_items > BTREE_MAX_KEYS:
+        while self.needs_split(current):
             let split = current.split()
             split.node.block_addr = self.allocator.alloc_block()
             self.write_node(current)

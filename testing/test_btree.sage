@@ -67,7 +67,25 @@ class MockAllocator:
         return bytes()
 
     proc write_block(self, addr: Int, data: Bytes):
-        self.blocks[addr] = data
+        ## Truncate to one block, the way VFS._write_block does.
+        ##
+        ## It copies at most bs bytes into the image, so a node that serializes
+        ## past the block size loses everything beyond it. This mock used to keep
+        ## the whole buffer, which made it *more* forgiving than the real
+        ## allocator and hid the size-split bug completely: an oversized node was
+        ## written whole here, so every key still read back and the test for it
+        ## passed with the fix reverted. A mock that is more tolerant than the
+        ## thing it stands in for cannot catch that class of bug.
+        let n = bytes_len(data)
+        if n <= BTREE_NODE_SIZE:
+            self.blocks[addr] = data
+            return
+        let cut = bytes()
+        var i: Int = 0
+        while i < BTREE_NODE_SIZE:
+            bytes_push(cut, bytes_get(data, i))
+            i = i + 1
+        self.blocks[addr] = cut
 
     proc block_count(self) -> Int:
         return len(self.blocks)
@@ -325,6 +343,131 @@ proc test_scan():
     check_count("count after deleting every key", many.count(), 0)
     check_count("scan after deleting every key", len(many.scan()), 0)
 
+proc check_nodes_fit(tree, addr: Int, oversized: Int, checked: Int):
+    let node = tree.read_node(addr)
+    checked = checked + 1
+    if bytes_len(node.serialize()) > BTREE_NODE_SIZE:
+        oversized = oversized + 1
+    if not node.is_leaf:
+        var i: Int = 0
+        while i < len(node.pointers):
+            check_nodes_fit(tree, node.pointers[i].block_addr, oversized, checked)
+            i = i + 1
+
+proc make_blob(n: Int) -> Bytes:
+    let b = bytes()
+    var i: Int = 0
+    while i < n:
+        bytes_push(b, 65 + (i % 26))
+        i = i + 1
+    return b
+
+proc test_split_on_serialized_size():
+    print("")
+    print("Split on serialized size, not just key count:")
+    let alloc = MockAllocator()
+    let tree = BTreeEngine(alloc, 0, 1)
+
+    ## One large value among many small ones. A leaf's serialized size is its
+    ## header plus 32 bytes per item plus its data area, so this node passes
+    ## BTREE_MAX_KEYS and still outgrows BTREE_NODE_SIZE.
+    ##
+    ## It used to be written anyway, and the allocator's write_block copies at
+    ## most one block -- so the node was silently truncated, losing the tail of
+    ## the item records and the data area. Nothing reported it: count() read the
+    ## key count out of the surviving header and reported every key present, while
+    ## search() returned nothing for the ones whose bytes had been dropped. A
+    ## root directory's dentry blob is a value big enough to do this, which is
+    ## how the inode table turned it up; extent values are too small to.
+    ## 41 keys whose values total ~9 KB between them: comfortable under
+    ## BTREE_MAX_KEYS keys, comfortably over one block of bytes.
+    tree.insert(make_key(1), make_blob(1100))
+    var i: Int = 2
+    while i <= 41:
+        tree.insert(make_key(i), make_blob(200))
+        i = i + 1
+
+    check_int("a large-value tree holds every key", tree.count(), 41)
+    check_int("and scan agrees", len(tree.scan()), 41)
+
+    ## Every node the tree can reach must fit a block, or writing it loses data.
+    var oversized: Int = 0
+    var checked: Int = 0
+    check_nodes_fit(tree, tree.root_block, oversized, checked)
+    check("the tree has nodes to check", checked > 0, true)
+    check_int("no reachable node exceeds a block", oversized, 0)
+
+    ## And the keys whose records fell past the boundary last time are readable.
+    var missing: Int = 0
+    var k: Int = 1
+    while k <= 41:
+        if bytes_len(tree.search(make_key(k))) == 0:
+            missing = missing + 1
+        k = k + 1
+    check_int("no key is lost to truncation", missing, 0)
+    check_bytes("the large value survives intact", tree.search(make_key(1)), make_blob(1100))
+
+    ## The same after a remount, which is where it showed up: every node CoWs, so
+    ## the oversized leaf is re-serialised and truncated again.
+    let tree2 = BTreeEngine(alloc, tree.root_block, tree.current_generation + 1)
+    check_int("a remounted large-value tree holds every key", tree2.count(), 41)
+    missing = 0
+    k = 1
+    while k <= 41:
+        if bytes_len(tree2.search(make_key(k))) == 0:
+            missing = missing + 1
+        k = k + 1
+    check_int("no key is lost on remount", missing, 0)
+
+    ## Replacing every value, as unmount does, must not drift back over the limit.
+    k = 1
+    while k <= 41:
+        if k == 1:
+            tree2.insert(make_key(k), make_blob(1100))
+        else:
+            tree2.insert(make_key(k), make_blob(200))
+        k = k + 1
+    oversized = 0
+    checked = 0
+    check_nodes_fit(tree2, tree2.root_block, oversized, checked)
+    check_int("replacing every value keeps every node in a block", oversized, 0)
+    check_int("replacing every value keeps every key", tree2.count(), 41)
+    missing = 0
+    k = 1
+    while k <= 41:
+        if bytes_len(tree2.search(make_key(k))) == 0:
+            missing = missing + 1
+        k = k + 1
+    check_int("no key is lost after replacing every value", missing, 0)
+
+proc test_insert_into_damaged_root():
+    print("")
+    print("Insert into a damaged root:")
+    let alloc = MockAllocator()
+    let tree = BTreeEngine(alloc, 0, 1)
+    tree.insert(make_key(1), make_data(1))
+    let root_blk: Int = tree.root_block()
+    check("a one-key tree has a root", root_blk > 0, true)
+
+    var zeros = bytes()
+    var z: Int = 0
+    while z < 64:
+        bytes_push(zeros, 0)
+        z = z + 1
+    alloc.write_block(root_blk, zeros)
+
+    check("a zeroed root is not readable", tree.root_is_readable(), false)
+    ## search() and scan() already read such a root as empty, so insert() had to
+    ## agree. It did not: the descent into a node with no items and no pointers
+    ## put the child index at -1 and dereferenced pointers[-1], so the first write
+    ## after a damaged root took the filesystem down -- which for the inode table
+    ## meant unmount crashed on exactly the volume that needed recovering.
+    tree.insert(make_key(2), make_data(2))
+    check("a write after a damaged root does not crash", true, true)
+    check("the damaged index is rebuilt as a usable tree", tree.root_is_readable(), true)
+    check_bytes("the new key is readable", tree.search(make_key(2)), make_data(2))
+    check("the old root is remembered for debugging", tree.damaged_root_block == root_blk, true)
+
 proc test_update_does_not_grow_data_area():
     print("")
     print("Replacing a value reclaims the old bytes:")
@@ -376,6 +519,8 @@ proc main():
     test_cow()
     test_scan()
     test_update_does_not_grow_data_area()
+    test_split_on_serialized_size()
+    test_insert_into_damaged_root()
     print("")
     print("Results: " + str(TESTS_PASSED) + "/" + str(TESTS_RUN) + " passed")
     if TESTS_PASSED == TESTS_RUN:

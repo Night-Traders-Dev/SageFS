@@ -39,7 +39,7 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 27/27 files, 767 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
+**Tests: 27/27 files, 778 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
 previously not running at all; see [Known issues](#known-issues) for what is
 still broken.
 
@@ -905,8 +905,54 @@ the inode table rather than during it. `BTreeNode.insert` now compacts once the
 dead bytes exceed twice the live bytes, rather than on every replacement, so
 reclaiming does not make a bulk rewrite quadratic.
 
+A second, more serious one surfaced while building the inode table on it: a leaf
+was split on **key count only**, never on serialized **byte size**. A leaf's size
+is its header plus 32 bytes per item plus its data area, so a node can sit well
+under `BTREE_MAX_KEYS` and still outgrow `BTREE_NODE_SIZE` — one large value
+among small ones is enough. The allocator's `write_block` copies at most one
+block, so the oversized node lost everything past the boundary, with no error
+reported. `count()` read the key count out of the surviving header and reported
+every key present while `search()` returned nothing for the ones whose bytes had
+been dropped. A root directory's dentry blob is a value big enough to do this,
+which is how it was found; extent values are too small to reach it.
+
+`BTreeEngine.needs_split()` now splits on either limit. A single item larger than
+a block is left alone — splitting cannot shrink it — and needs an overflow chain,
+which this format does not have yet.
+
+Two smaller robustness fixes came out of the same work:
+
+- `insert()` into a tree whose recorded root is not a node walked to
+  `pointers[-1]` and took the filesystem down, while `search()` and `scan()`
+  already read such a root as empty. `root_is_readable()` now checks the magic,
+  so damage is distinguishable from emptiness, and `insert()` starts a new root
+  rather than indexing into a dead one.
+- `BTreeNode.deserialize()` records whether it found the node magic, which is
+  what makes that distinction possible at all.
+
 Not yet done: the inode table itself, the `_persist_all` and mount-loader swap,
-and the `version_minor` bump to 1.5. The version is deliberately still 1.4
+and the `version_minor` bump to 1.5. That work is written and its own tests pass
+(130/130) but is **not** committed: it depends on block allocation surviving a
+remount, which it currently does not — see below.
+
+## Block allocation does not survive a remount (blocks the inode table)
+
+The NAT is not persisted. On mount the segment manager comes up with no record of
+which physical blocks the previous session used, so it will hand out a block that
+is still holding live file data. Any metadata written after a remount can
+therefore land on top of a file's data.
+
+This is pre-existing and was invisible for a long time because the extent tree
+allocates few enough blocks after a remount to avoid overlapping live data. The
+inode table's per-mount CoW allocates enough to collide, and when it does the
+collision is silent: a file keeps its length and its extents, and the blocks
+those extents point at now hold tree nodes instead of data. So the bytes are gone
+with nothing to indicate it.
+
+The fix is NAT persistence — a used-block record that survives unmount — and that
+is a change to the allocator, segment and superblock layers rather than to the
+inode table. It is the next thing to do, and until it is done the inode table
+cannot be switched on. The version is deliberately still 1.4
 — claiming 1.5 before the tree exists would make the version lie to anyone
 reading the header, and the fallback gate is keyed on it. Until that lands,
 inode metadata is still read from and written to the 32 KiB area, and the new
