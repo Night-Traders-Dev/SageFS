@@ -259,8 +259,26 @@ class BTreeNode:
             item.data_size = bytes_len(data)
             for i in range(bytes_len(data)):
                 bytes_push(self.data_area, bytes_get(data, i))
+            ## Replacing a value appends the new bytes and repoints the item, but
+            ## leaves the old ones in data_area. Nothing reclaimed them:
+            ## compact_data_area() was only ever called from delete(), so a key
+            ## updated repeatedly grew its leaf's data area without bound. Values
+            ## still read back correctly, because the item points at the newest
+            ## bytes, which is why this was silent -- until the data area outgrew
+            ## BTREE_NODE_SIZE and the node could no longer be serialized. Updating
+            ## one key 146 times with a 28-byte value was enough to do that, and
+            ## rewriting a dirty inode on every unmount hits this directly.
+            ##
+            ## Compacted on a threshold rather than on every update, so reclaiming
+            ## does not make a bulk rewrite quadratic in the number of keys.
+            var live: Int = 0
+            var k: Int = 0
+            while k < self.num_items:
+                live = live + self.items[k].data_size
+                k = k + 1
+            if bytes_len(self.data_area) > live * 2 + 64:
+                self.compact_data_area()
             return
-
         let data_offset = bytes_len(self.data_area)
         let data_size = bytes_len(data)
 

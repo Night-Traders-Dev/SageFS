@@ -325,6 +325,46 @@ proc test_scan():
     check_count("count after deleting every key", many.count(), 0)
     check_count("scan after deleting every key", len(many.scan()), 0)
 
+proc test_update_does_not_grow_data_area():
+    print("")
+    print("Replacing a value reclaims the old bytes:")
+    let alloc = MockAllocator()
+    let tree = BTreeEngine(alloc, 0, 1)
+    let key = make_key(42)
+    ## 28 bytes, not make_data()'s 6: 500 replacements of a 6-byte value is only
+    ## 3000 bytes and still fits in a node, which would leave the node-size
+    ## assertion below passing no matter what the code did. At 28 bytes the
+    ## unfixed behaviour reaches 14000, so the check has something to catch.
+    let payload = bytes("aaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+    ## Replacing a value appends the new bytes and repoints the item. Nothing
+    ## used to reclaim the old ones -- compact_data_area() was only called from
+    ## delete() -- so a repeatedly-updated key grew its leaf's data area without
+    ## bound. Values still read back correctly throughout, because the item
+    ## points at the newest bytes, so the only symptom was the data area
+    ## outgrowing BTREE_NODE_SIZE and the node becoming unserializable.
+    var i: Int = 0
+    while i < 500:
+        tree.insert(key, payload)
+        i = i + 1
+
+    let leaf = tree.read_node(tree.root_block)
+    check_count("repeated updates keep one item, not 500", leaf.num_items, 1)
+    check_count("data area stays inside a node", bytes_len(leaf.data_area) <= BTREE_NODE_SIZE, true)
+
+    ## Without the reclaim this is 14000 bytes and the serialized node is 14064 --
+    ## 3.4x the block, written straight through the end of it.
+    check_count("serialized node still fits a block", bytes_len(leaf.serialize()) <= BTREE_NODE_SIZE, true)
+    check_count("data area is bounded, not merely legal", bytes_len(leaf.data_area) < 200, true)
+    check_bytes("value survives 500 replacements", tree.search(key), payload)
+
+    ## A key that is genuinely new must still be appended, not replaced.
+    tree.insert(make_key(43), make_data(2))
+    let leaf2 = tree.read_node(tree.root_block)
+    check_count("a new key still appends", leaf2.num_items, 2)
+    check_count("first key still readable", bytes_len(tree.search(make_key(42))), bytes_len(payload))
+    check_bytes("second key readable", tree.search(make_key(43)), make_data(2))
+
 proc main():
     print("=== SageFS B+ Tree Engine Tests ===")
     test_insert_search_single()
@@ -335,6 +375,7 @@ proc main():
     test_serialization()
     test_cow()
     test_scan()
+    test_update_does_not_grow_data_area()
     print("")
     print("Results: " + str(TESTS_PASSED) + "/" + str(TESTS_RUN) + " passed")
     if TESTS_PASSED == TESTS_RUN:

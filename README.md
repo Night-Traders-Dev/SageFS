@@ -39,7 +39,7 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 27/27 files, 759 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
+**Tests: 27/27 files, 767 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
 previously not running at all; see [Known issues](#known-issues) for what is
 still broken.
 
@@ -135,7 +135,7 @@ SageFS integrates Python-like readable and C-like performant SageLang to deliver
     against this implementation
   - No lock-free hot paths, no io_uring
 
-- **Development**: 27 test files, 759 assertions, 6 CLI tools
+- **Development**: 27 test files, 767 assertions, 6 CLI tools
 
 The binary image format uses little-endian encoding with 4 KiB blocks and 512
 blocks per segment. The B+ tree is the exception: its node magic and its keys
@@ -220,7 +220,7 @@ What is missing is a working session setup.
 ### Run Tests
 
 ```bash
-# Full test suite — 27 files, 759 assertions
+# Full test suite — 27 files, 767 assertions
 ./sagemake test
 
 # A single file
@@ -891,6 +891,19 @@ already has for a zeroed root, so damaged metadata cannot send the walk to
 split and the scan has to descend past a single leaf, checks ordering and that
 each value stays with its own key, reopens the tree against the same allocator to
 stand in for reading a saved image, and checks that deletions are reflected.
+
+Also found and fixed while building on it: a B+ tree leaf's data area grew
+without bound when a key's value was replaced. Replacing a value appends the new
+bytes and repoints the item, leaving the old ones behind, and
+`compact_data_area()` was only ever called from `delete()`. Values still read back
+correctly throughout, because the item points at the newest bytes, so nothing
+looked wrong until the leaf outgrew `BTREE_NODE_SIZE`. Updating one key 500 times
+with a 28-byte value produced a 14000-byte data area and a **14064-byte serialized
+node — 3.4× the block**, written straight through the end of it. Rewriting a dirty
+inode on every unmount hits this directly, which is why it had to be fixed before
+the inode table rather than during it. `BTreeNode.insert` now compacts once the
+dead bytes exceed twice the live bytes, rather than on every replacement, so
+reclaiming does not make a bulk rewrite quadratic.
 
 Not yet done: the inode table itself, the `_persist_all` and mount-loader swap,
 and the `version_minor` bump to 1.5. The version is deliberately still 1.4
