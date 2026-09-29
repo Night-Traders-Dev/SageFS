@@ -106,6 +106,9 @@ class VFS:
         ## segment manager this mount, and how many entries came back.
         self.sit_loaded = false
         self.sit_entries_loaded = 0
+        ## Whether the "directory no longer fits inline" warning has been printed,
+        ## so a large directory reports once rather than on every save.
+        self.dir_overflow_reported = false
         ## Inode metadata index (format v1.5). A separate B+ tree from the
         ## extent map, with its own root and generation, so writing an inode
         ## does not copy the extent map along with it.
@@ -788,7 +791,23 @@ class VFS:
                 bytes_push(data_bytes, bytes_get(name_bytes, j))
                 j = j + 1
         let hex_data: String = self._bytes_to_hex(data_bytes)
-        inode_obj.set_inline_data(hex_data)
+        ## A directory that no longer fits inline must not be dropped in silence.
+        ##
+        ## set_inline_data() refuses anything over INLINE_DATA_MAX (3400) and
+        ## returns false having changed nothing, so the inode kept whatever it
+        ## already had and the directory stopped being recorded at all. The
+        ## inodes were still written to the inode table, so the files existed and
+        ## were unreachable by name: a "fileNNN.txt" entry costs 36 hex
+        ## characters, so 3400 / 36 puts the ceiling at 94 entries in one
+        ## directory. Anything past that was accepted, handed a file descriptor,
+        ## and then lost on unmount with no error anywhere.
+        if not inode_obj.set_inline_data(hex_data):
+            if not self.dir_overflow_reported:
+                self.dir_overflow_reported = true
+                print("SageFS: directory for inode " + str(ino) + " no longer fits inline (" +
+                      str(len(hex_data)) + " > " + str(inode_module.INLINE_DATA_MAX) +
+                      " chars of hex). Its entries are NOT being saved, and files created in it " +
+                      "will not survive a remount. Directory entries need their own index.")
         self.inode.update_inode(ino)
         ## No direct write to the image here.
         ##

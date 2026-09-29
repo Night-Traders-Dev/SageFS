@@ -387,6 +387,56 @@ proc test_vfs_migration_from_area():
     check("the root is still reachable", fs2.stat("/") != nil, true)
     check("unmount", fs2.unmount(), true)
 
+proc test_directory_inline_ceiling():
+    print("")
+    print("Directory inline ceiling (known limit, now reported):")
+    let dev: String = "/tmp/sagefs_inodetable_dircap.img"
+    check("format image", format_image(dev, "InoDirCap", true), true)
+
+    let fs = vfs.VFS(dev)
+    check("mount", fs.mount(), true)
+
+    ## A "fileNNN.txt" dentry costs 36 hex characters and the inline limit is
+    ## 3400, so one directory stops fitting at 94 entries. Everything below
+    ## that must work normally.
+    var made: Int = 0
+    var i: Int = 0
+    while i < 300:
+        let fd = fs.open("/file" + str(i) + ".txt", vfs.O_CREAT | vfs.O_RDWR)
+        if fd >= 0:
+            fs.write(fd, bytes("content number " + str(i)))
+            fs.close(fd)
+            made = made + 1
+        i = i + 1
+    check("some number of files were created", made > 0, true)
+    check("the overflow is reported rather than silent", fs.dir_overflow_reported, true)
+
+    ## The directory-entry cap is MAX_INLINE_DENTRIES and is a separate limit
+    ## from the inode table's. The table itself has no such ceiling: every inode
+    ## that exists is in it, which is the property v1.5 was for.
+    let inodes_in_memory = len(fs.inode.list_inodes())
+    check("unmount", fs.unmount(), true)
+    check_int("the inode table holds every inode that exists", fs.itable.count(), inodes_in_memory)
+    check("the table is well past what 32 KiB of area could hold", inodes_in_memory > 100, true)
+
+    ## Names beyond the ceiling do not survive, and that is the documented
+    ## behaviour rather than a silent loss. Everything inside the ceiling does.
+    let fs2 = vfs.VFS(dev)
+    check("remount", fs2.mount(), true)
+    var survived: Int = 0
+    var lost: Int = 0
+    var j: Int = 0
+    while j < 300:
+        if fs2.resolve_path("/file" + str(j) + ".txt") != -1:
+            survived = survived + 1
+        j = j + 1
+    lost = made - survived
+    check_int("every directory entry inside the ceiling survives", survived, 94)
+    check("the entries past the ceiling are the difference", lost > 0, true)
+    print("  (inodes " + str(inodes_in_memory) + " in the table, " + str(survived) +
+          " of " + str(made) + " names resolvable -- directory entries still need their own index)")
+    check("unmount", fs2.unmount(), true)
+
 proc test_v14_versioned_image():
     print("")
     print("A genuine v1.4 image mounts and migrates:")
@@ -549,6 +599,7 @@ proc main():
     test_vfs_migration_from_area()
     test_vfs_damaged_root()
     test_v14_versioned_image()
+    test_directory_inline_ceiling()
     test_vfs_persist_only_dirty()
 
     print("")

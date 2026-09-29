@@ -39,7 +39,7 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 28/28 files, 925 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
+**Tests: 28/28 files, 936 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
 previously not running at all; see [Known issues](#known-issues) for what is
 still broken.
 
@@ -980,6 +980,32 @@ inode-only snapshot possible.
 allocator, the VFS round trip, unlink (both the retained-with-data case and the
 deleted-when-empty case), migration from the area, a deliberately corrupted root,
 dirty-only persist, and a genuine v1.4 image rewritten to look like one.
+
+## Directory entries still do not scale (the next piece, and it is now loud)
+
+The inode table removed the 32 KiB metadata ceiling, but **directory entries are a
+separate limit and were not touched**. A directory is still stored as one hex blob
+in the parent inode's inline data, capped by `INLINE_DATA_MAX` of 3400. A
+`fileNNN.txt` dentry costs 36 hex characters, so one directory holds **94
+entries**; `MAX_INLINE_DENTRIES` caps it at 200 by the same mechanism.
+
+Past that ceiling the directory was not recorded *at all*. `set_inline_data()`
+refuses anything over the limit and returns false having changed nothing, so the
+inode kept whatever it had and every subsequent change was discarded. The inodes
+were still written to the table, so files past the point existed, were handed file
+descriptors, and were unreachable by name after a remount — with no error
+anywhere. `_save_dir()` now checks the return and reports, once per volume, that
+the directory is not being saved and that its files will not survive.
+
+Measured on 300 files in one directory: 257 inodes created, **all 257 in the inode
+table** (which is the property v1.5 was for, and past what 32 KiB of area could
+have held), 94 names resolvable after a remount. The gap is entirely the
+directory-entry limit.
+
+The fix is to give directory entries their own index — the same treatment the
+inode table just got, and independent for the same reason. That is the next piece
+of work; it is the last thing standing between this and a filesystem whose
+metadata does not stop scaling at a fixed size.
 
 ## Block allocation did not survive a remount (fixed, and it was the real bug)
 
