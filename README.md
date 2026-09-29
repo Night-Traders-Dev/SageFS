@@ -39,7 +39,7 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 27/27 files, 778 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
+**Tests: 28/28 files, 925 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
 previously not running at all; see [Known issues](#known-issues) for what is
 still broken.
 
@@ -930,30 +930,80 @@ Two smaller robustness fixes came out of the same work:
 - `BTreeNode.deserialize()` records whether it found the node magic, which is
   what makes that distinction possible at all.
 
-Not yet done: the inode table itself, the `_persist_all` and mount-loader swap,
-and the `version_minor` bump to 1.5. That work is written and its own tests pass
-(130/130) but is **not** committed: it depends on block allocation surviving a
-remount, which it currently does not — see below.
+## Format v1.5 — inode metadata in a B+ tree
 
-## Block allocation does not survive a remount (blocks the inode table)
+All inode metadata used to be written as hex text into a single fixed 32 KiB area
+carved out of the reserved blocks. That capped the filesystem at whatever fitted
+in 32 KiB, and `_persist_all()` had to know it was about to run out and drop
+inodes on the floor — reporting how many on stdout, which is not something a
+filesystem should do silently or at all. The ceiling was architectural rather than
+a matter of tuning: it could not be raised without another on-disk format change,
+and a volume with more metadata than that simply could not be represented.
 
-The NAT is not persisted. On mount the segment manager comes up with no record of
-which physical blocks the previous session used, so it will hand out a block that
-is still holding live file data. Any metadata written after a remount can
-therefore land on top of a file's data.
+`src/inodetable.sage` moves it into a B+ tree with its own root and generation,
+recorded at superblock 368/376. A separate root is not incidental: sharing one
+with the extent map would put both under a single CoW generation, so writing one
+inode would copy the whole extent map too, and O(1) snapshot cloning would need
+every other index cloned as well. Separate roots are also what makes an
+inode-only snapshot possible.
 
-This is pre-existing and was invisible for a long time because the extent tree
-allocates few enough blocks after a remount to avoid overlapping live data. The
-inode table's per-mount CoW allocates enough to collide, and when it does the
-collision is silent: a file keeps its length and its extents, and the blocks
-those extents point at now hold tree nodes instead of data. So the bytes are gone
-with nothing to indicate it.
+- The entries are byte-identical to what the area held, via the shared
+  `imgio.encode_inode_entry()`, so migration is not a second parser and a volume
+  can move between the two without rewriting entries.
+- `mount()` decides from the *tree*, not the version: a volume whose root block
+  does not hold a node is reported and falls back to the area, and a volume with
+  no root is read from the area and rewritten into the tree by the first unmount.
+  An old image needs no conversion step.
+- Unmount writes the version as 1.5 whenever a tree exists, so the fields survive
+  the `version_minor >= 5` gate on the next mount. Without that a migrated volume
+  stayed stamped 1.4, its root was zeroed again, and it went back to an area that
+  no longer held the file.
+- Only dirty inodes are written, so unmount cost tracks what changed rather than
+  how much exists. Getting there needed three fixes to dirty tracking, each of
+  which alone made every mount rewrite the whole table: the loader noted every
+  inode it read, `_recompute_link_counts` marked every inode whose recomputed link
+  count differed from the default a freshly loaded inode carries (nlink is derived
+  and has no field in the on-disk entry, so it is never written back), and
+  `_ensure_stub_inode` correctly marks what it creates — which is every inode,
+  because the in-memory table starts empty on each mount.
+- Deletions are found by diffing the tree against the in-memory set. A deleted
+  inode is *absent* from `list_inodes()`, so a loop over the in-memory set never
+  visits its number and the stale entry survives; the area writer did not hit this
+  only because it rewrote everything and zeroed the remainder, making absence
+  implicit.
+- `InodeTable` advances its CoW generation on first write rather than at mount.
+  Opening at `generation + 1` makes every node stale at once, so any mount that
+  wrote anything copied the entire table — and that was not merely expensive, see
+  below.
 
-The fix is NAT persistence — a used-block record that survives unmount — and that
-is a change to the allocator, segment and superblock layers rather than to the
-inode table. It is the next thing to do, and until it is done the inode table
-cannot be switched on. The version is deliberately still 1.4
-— claiming 1.5 before the tree exists would make the version lie to anyone
-reading the header, and the fallback gate is keyed on it. Until that lands,
-inode metadata is still read from and written to the 32 KiB area, and the new
-fields simply sit at zero.
+`testing/test_inodetable.sage` is 147 assertions covering the table over a mock
+allocator, the VFS round trip, unlink (both the retained-with-data case and the
+deleted-when-empty case), migration from the area, a deliberately corrupted root,
+dirty-only persist, and a genuine v1.4 image rewritten to look like one.
+
+## Block allocation did not survive a remount (fixed, and it was the real bug)
+
+The NAT was not persisted, so on mount the segment manager came up with no record
+of which physical blocks the previous session had used and would hand one out
+again. Any metadata written after a remount could therefore land on top of a
+file's live data.
+
+This sat unnoticed for a long time because the extent tree allocates few enough
+blocks after a remount to avoid overlapping anything. The inode table's per-mount
+CoW allocates enough to collide, and the collision is silent: the file keeps its
+length, its extents and its inode entry, and the blocks those extents point at now
+hold tree nodes instead of data. The bytes are gone with nothing to indicate it —
+`read_inode_data()` returned a correctly sized buffer of the wrong contents.
+
+The segment manager already had the machinery: `SITEntry` carries a per-block
+validity bitmap and `allocate_block()` maintains it correctly. It was simply never
+written out. `SITEntry.deserialize()`, `SegmentManager.load_sit()` and
+`save_sit()` now round-trip it through the SIT region the layout has always
+reserved at `sit_start_blk`, loaded at mount before anything can allocate and
+saved at unmount after allocation has finished. The validity count is recomputed
+from the bitmap rather than trusted, since the two are written separately and a
+torn write can leave them disagreeing — and the bitmap is the one consulted when
+allocating, so it is the one that has to be right. Segments holding valid blocks
+are taken out of the free list and the current-segment cursors are reset, so a
+segment with live blocks is never reissued.
+

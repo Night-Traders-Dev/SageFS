@@ -13,6 +13,7 @@ import inode as inode_module
 import dir as dir_module
 import extent as extent_module
 import btree as btree_module
+import inodetable as it_module
 import imgio
 import aio as aio_module
 import cache as cache_module
@@ -101,6 +102,18 @@ class VFS:
         self.encrypt = encrypt_layer
         self.raid = raid_eng
         self.xattr = xattr_mgr
+        ## Whether the on-disk segment information table has been read into the
+        ## segment manager this mount, and how many entries came back.
+        self.sit_loaded = false
+        self.sit_entries_loaded = 0
+        ## Inode metadata index (format v1.5). A separate B+ tree from the
+        ## extent map, with its own root and generation, so writing an inode
+        ## does not copy the extent map along with it.
+        self.itable = nil
+        ## True when this volume was read out of the pre-v1.5 fixed inode area
+        ## and has not yet been rewritten into the tree. Set at mount, cleared by
+        ## the first _persist_all() that gets far enough to write the tree.
+        self.inode_area_migration = false
 
     proc _init_block_size(self) -> Int:
         if self.sb.block_size > 0:
@@ -227,6 +240,21 @@ class VFS:
         if self.allocator == nil:
             self.allocator = alloc_module.BlockAllocator(self.segment, self.nat, bs, total_blks)
 
+        ## Load the segment information table before anything can allocate.
+        ##
+        ## The segment manager keeps a per-block validity bitmap and
+        ## allocate_block() maintains it correctly, but nothing wrote it out, so
+        ## every segment came back with an empty bitmap on the next mount and the
+        ## first allocation after a remount could return a block the previous
+        ## session was still using for live data. The overwrite is silent -- the
+        ## file's extents and inode entry are untouched, so it keeps its length
+        ## and reads back whatever now occupies its blocks. Without this the
+        ## inode table's per-mount CoW allocates enough to hit that collision, and
+        ## a file loses its contents while still reporting the right size.
+        if not self.sit_loaded:
+            self.sit_loaded = true
+            self.sit_entries_loaded = self.segment.load_sit(self.image_buf, self.sb.sit_start_blk, bs)
+
         if self.inode == nil:
             self.inode = inode_module.InodeManager(self.nat)
             let root_inode_val = self.inode.create_root()
@@ -245,6 +273,23 @@ class VFS:
 
         if self.extent == nil:
             self.extent = extent_module.ExtentTree(self.btree, self._init_block_size())
+
+        if self.itable == nil:
+            ## Separate root and generation from the extent map -- see the note on
+            ## self.itable in init(). Generation is advanced on every mount, the
+            ## same way the extent tree's is, so that a mount never mutates nodes
+            ## a previous generation may still be referenced by. Inode
+            ## availability at mount is decided by reading the tree, not by
+            ## trusting the recorded root: a volume whose root block reads back
+            ## as a valid node is read from the tree, and anything else falls
+            ## back to the legacy area.
+            ## Opened at the recorded generation, not recorded + 1: the table
+            ## advances its own CoW generation when it is first written, so a
+            ## mount that changes nothing allocates nothing. See
+            ## InodeTable.ensure_writable().
+            let inode_engine = btree_module.BTreeEngine(self, self.sb.inode_root_blk,
+                                                       self.sb.inode_root_generation)
+            self.itable = it_module.InodeTable(inode_engine)
 
         if self.dir == nil:
             self.dir = dir_module.DirManager()
@@ -293,7 +338,14 @@ class VFS:
 
         self.nat.prefill_free_nids(128)
 
-        ## Parse inode entries from the reserved block area
+        ## Inode metadata (format v1.5).
+        ##
+        ## Read the tree when it has a root that really holds a node. A volume
+        ## formatted before v1.5 has inode_root_blk == 0 and its metadata in the
+        ## fixed area, so it is read from there and rewritten into the tree by the
+        ## first _persist_all(). A volume with a non-zero root whose block is not
+        ## a node has lost its metadata index; that is reported rather than
+        ## silently mounting empty, and the area is tried as a last resort.
         let area_start = self.sb.inode_entry_start_blk * bs
         let area_size = self.sb.inode_entry_byte_size
         ## Grow the image so the reserved area is actually present before reading
@@ -304,41 +356,90 @@ class VFS:
         ## read_inode_entries_from_area() with nothing pointing at the real
         ## cause. A short image should read as an empty reserved area.
         self._ensure_image_size(area_start + area_size)
-        if area_size > 0:
-            let legacy_entries = imgio.read_inode_entries_from_area(self.image_buf, area_start, area_size)
 
-            var i = 0
-            while i < len(legacy_entries):
-                let le = legacy_entries[i]
-                let l_name: String = le["name"]
-                let l_ino: Int = le["ino"]
-                let l_mode: Int = le["mode"]
-                let l_size: Int = le["size"]
-                let l_data: String = le["data"]
-                if len(l_name) == 0:
-                    let target = self.inode.get_inode(l_ino)
-                    if target == nil:
-                        self._ensure_stub_inode(l_ino, l_mode, l_data, l_size)
+        var use_tree = self.itable.is_readable()
+        var named_entries: Array = []
+        var inline_entries: Array = []
+        if use_tree:
+            let tree_entries = self.itable.scan()
+            ## A readable root with no entries means the index was damaged after
+            ## all -- a node with the right magic is always the result of at least
+            ## one insert, so an empty walk is not a legitimate state. Fall back
+            ## to the area rather than coming up with no inodes at all.
+            if len(tree_entries) == 0:
+                print("SageFS: inode tree at block " + str(self.itable.root_block()) +
+                      " is readable but empty; falling back to the legacy inode area.")
+                use_tree = false
+            else:
+                var ti = 0
+                while ti < len(tree_entries):
+                    let te = tree_entries[ti]
+                    push(inline_entries, te)
+                    push(named_entries, te)
+                    ti = ti + 1
+        else:
+            if self.itable.root_block() != 0:
+                print("SageFS: inode tree root at block " + str(self.itable.root_block()) +
+                      " does not hold a B-tree node; inode metadata is damaged.")
+            if area_size > 0:
+                let legacy_entries = imgio.read_inode_entries_from_area(self.image_buf, area_start, area_size)
+                var li = 0
+                while li < len(legacy_entries):
+                    let le = legacy_entries[li]
+                    ## Name-carrying entries are directory records rather than
+                    ## inode metadata; the two passes below kept them apart, and
+                    ## the tree only ever stores the nameless ones.
+                    if len(le["name"]) == 0:
+                        push(inline_entries, le)
                     else:
-                        target.set_inline_data(l_data)
-                        target.size = l_size
-                        self.inode.note_inode(l_ino)
-                i = i + 1
+                        push(named_entries, le)
+                    li = li + 1
+                ## Everything read out of the area has to be rewritten into the
+                ## tree, so mark the whole in-memory set dirty rather than relying
+                ## on the loader below to have noted each one. A partial migration
+                ## would leave a volume whose superblock advertises a tree that is
+                ## missing inodes, with nothing to indicate which.
+                self.inode_area_migration = true
+                self.inode.mark_all_dirty()
 
-            i = 0
-            while i < len(legacy_entries):
-                let le = legacy_entries[i]
-                let l_name: String = le["name"]
-                let l_ino: Int = le["ino"]
-                let l_mode: Int = le["mode"]
-                let l_size: Int = le["size"]
-                let l_data: String = le["data"]
-                if len(l_name) > 0:
-                    if self.dir.lookup(l_name) == -1:
-                        self.dir.add_entry(l_name, l_ino, dir_module.DT_REG)
-                    if self.inode.get_inode(l_ino) == nil:
-                        self._ensure_stub_inode(l_ino, l_mode, l_data, l_size)
-                i = i + 1
+        var i = 0
+        while i < len(inline_entries):
+            let le = inline_entries[i]
+            let l_name: String = le["name"]
+            let l_ino: Int = le["ino"]
+            let l_mode: Int = le["mode"]
+            let l_size: Int = le["size"]
+            let l_data: String = le["data"]
+            if len(l_name) == 0:
+                let target = self.inode.get_inode(l_ino)
+                if target == nil:
+                    self._ensure_stub_inode(l_ino, l_mode, l_data, l_size)
+                else:
+                    ## Loading persisted state is not a modification, so the inode
+                    ## is deliberately left clean. Marking it dirty here made every
+                    ## inode in the table dirty on every mount, which defeated the
+                    ## whole point of the tree: unmount has to write only what
+                    ## changed, and with the whole table dirty it wrote the whole
+                    ## table -- exactly what the fixed area always did. The area
+                    ## path gets its dirty set separately, via mark_all_dirty().
+                    target.set_inline_data(l_data)
+                    target.size = l_size
+            i = i + 1
+
+        i = 0
+        while i < len(named_entries):
+            let le = named_entries[i]
+            let l_name: String = le["name"]
+            let l_ino: Int = le["ino"]
+            let l_mode: Int = le["mode"]
+            let l_size: Int = le["size"]
+            let l_data: String = le["data"]
+            if len(l_name) > 0:
+                if self.dir.lookup(l_name) == -1:
+                    self.dir.add_entry(l_name, l_ino, dir_module.DT_REG)
+                if self.inode.get_inode(l_ino) == nil:
+                    self._ensure_stub_inode(l_ino, l_mode, l_data, l_size)
+            i = i + 1
 
         let root_inode = self.inode.get_inode(ROOT_INO)
         if root_inode != nil and len(root_inode.get_inline_data()) > 0:
@@ -353,6 +454,17 @@ class VFS:
 
         ## Rebuild link counts from the directory tree.
         self._recompute_link_counts()
+
+        ## Everything now in memory came off stable storage, so nothing is dirty.
+        ##
+        ## The in-memory table starts empty on every mount, so the loader has to
+        ## create an inode for each entry it reads -- through _ensure_stub_inode,
+        ## which correctly marks what it creates as dirty. But reading the table
+        ## is not modifying it, and leaving the whole table dirty meant unmount
+        ## rewrote every inode on every mount: the one property the inode table
+        ## exists to provide. Migration does not depend on this -- it writes the
+        ## full in-memory set, not the dirty set, and sets its own flag above.
+        self.inode.checkpoint()
 
         self.mounted = true
         self.ino_path_cache = {}
@@ -442,7 +554,15 @@ class VFS:
                 want = refs[ino]
             if inode_obj.nlink != want:
                 inode_obj.nlink = want
-                self.inode.update_inode(ino)
+                ## Deliberately not marked dirty. A link count is derived from
+                ## the directory tree, and the on-disk inode entry has no field
+                ## for it -- encode_inode_entry() stores ino, mode, size and data
+                ## and nothing else. So there is no nlink on disk to bring up to
+                ## date, and writing the inode because the derived value changed
+                ## would dirty every inode on every mount: recomputation always
+                ## differs from the default a freshly loaded inode carries, so
+                ## the whole table looked modified and unmount rewrote all of it.
+                ## That is precisely the cost the inode table exists to remove.
 
     proc _walk_link_counts(self, ino: Int, refs: Dict[Int, Int], subdirs: Dict[Int, Int],
                            visited: Dict[Int, Bool]):
@@ -464,54 +584,82 @@ class VFS:
             self._walk_link_counts(entry.ino, refs, subdirs, visited)
 
     proc _persist_all(self):
-        let bs = self._init_block_size()
-        let area_start = self.sb.inode_entry_start_blk * bs
-        let area_size = self.sb.inode_entry_byte_size
-        if area_size <= 0:
+        ## Write dirty inode metadata into the inode B+ tree (format v1.5).
+        ##
+        ## This replaces the fixed-area writer, which packed every inode's
+        ## metadata as hex text into 32 KiB of reserved blocks and dropped
+        ## whatever did not fit -- reporting how many it dropped on stdout, which
+        ## is not something a filesystem should do silently or at all. The ceiling
+        ## was architectural rather than a matter of tuning: it could not be
+        ## raised without another on-disk format change, and a volume with
+        ## metadata past 32 KiB simply could not be represented.
+        ##
+        ## Only dirty inodes are written, which is what makes the tree worth
+        ## having: mount does not have to rewrite the whole table to change one
+        ## file, so unmount cost tracks what changed rather than how much exists.
+        if self.itable == nil:
             return
-        let area_end = area_start + area_size
-        self._ensure_image_size(area_end)
-        var off = area_start
-        var dropped = 0
-        let all_inos = self.inode.list_inodes()
-        for ino in all_inos:
-            let inode_obj = self.inode.get_inode(ino)
+        ## Migrating from the area: the tree has to end up holding every inode, not
+        ## just the ones that happen to be dirty, or the next mount reads a
+        ## complete-looking tree that is quietly missing the rest.
+        let full_set = self.inode_area_migration
+        let candidates = self.inode.list_inodes()
+
+        ## Inodes that exist in memory right now. Used to find tree entries whose
+        ## inode has been deleted.
+        ##
+        ## Deletions have to be found by diffing, not by iterating the in-memory
+        ## set: a deleted inode is *absent* from list_inodes(), so a loop over it
+        ## never visits the number and the stale entry stays in the tree. The area
+        ## writer did not have this problem only because it rewrote the whole
+        ## area and zeroed the remainder, so absence was implicit.
+        let live: Dict = {}
+        for ino in candidates:
+            live[str(ino)] = true
+
+        var removed = 0
+        if not full_set:
+            ## Read the tree's keys and drop any that no longer have an inode.
+            ## A scan, not a write, so it costs far less than the fixed area
+            ## writer did -- but it is still O(inodes) at unmount, and the honest
+            ## way to avoid even that is for the deletion paths to remove from the
+            ## table as they unlink, which is not wired up yet.
+            let existing = self.itable.scan()
+            for e in existing:
+                let eino: Int = e["ino"]
+                if not dict_has(live, str(eino)):
+                    self.itable.remove(eino)
+                    removed = removed + 1
+
+        ## What to write. Normally only the dirty set, which is the whole reason
+        ## the tree is worth having: the fixed area had to rewrite every inode on
+        ## every unmount because there was nowhere else to put them. During a
+        ## migration from the area the set has to be the whole table, since the
+        ## tree starts empty and a partial copy would look like a complete one.
+        ##
+        ## Both lists are inode objects. list_inodes() returns inode *numbers*,
+        ## so a migration cannot reuse it directly -- doing so fed integers into a
+        ## loop that calls get_inline_data() on each element.
+        let to_write: Array = self.inode.get_dirty_inodes()
+        if full_set:
+            to_write = []
+            for ino in candidates:
+                let obj = self.inode.get_inode(ino)
+                if obj != nil:
+                    push(to_write, obj)
+
+        var written = 0
+        for inode_obj in to_write:
             if inode_obj == nil:
                 continue
-            let data_str: String = inode_obj.get_inline_data()
-            ## A zero-length file still has to be written. It used to be skipped,
-            ## so truncate-to-0 (or creating an empty file) left nothing in the
-            ## inode area and the file did not survive a remount.
-            if len(data_str) > 0 or inode_obj.size >= 0:
-                ## Never write past the reserved area.
-                ##
-                ## The area is a fixed 8 blocks and ends exactly where the journal
-                ## region begins (inode_entry_start_blk 8 + INODE_ENTRY_RESERVED_BLKS
-                ## 8 == RESERVED_BLKS 16), and write_inode_entry_at does no bounds
-                ## checking of its own -- it grows the image and writes wherever it
-                ## is told. So the write is bounded here rather than trusted.
-                ##
-                ## I have not reproduced this actually being hit, and the directory
-                ## entry cap currently keeps the total well under the limit -- so
-                ## treat this as a guard on an invariant that is one format change
-                ## away from mattering, not a fix for an observed corruption. The
-                ## real ceiling is architectural: all inode metadata is hex text in
-                ## a fixed 32 KiB area, so it cannot scale.
-                let need = 16 + len(data_str)
-                if off + need > area_end:
-                    dropped = dropped + 1
-                    continue
-                let entry_size = imgio.write_inode_entry_at(self.image_buf, off, ino, inode_obj.mode, inode_obj.size, "", data_str)
-                off = off + entry_size
-        ## Zero out remaining area
-        while off < area_end:
-            bytes_set(self.image_buf, off, 0)
-            off = off + 1
-        if dropped > 0:
-            print("SageFS: " + str(dropped) + " inode(s) did not fit in the " +
-                  str(area_size) + "-byte reserved inode area and were NOT saved. " +
-                  "Their data may still be in the extent tree, but their directory " +
-                  "entries are gone. The inode area must move into real blocks.")
+            self.itable.put(inode_obj.ino, inode_obj.mode, inode_obj.size, "",
+                            inode_obj.get_inline_data())
+            written = written + 1
+        if full_set:
+            self.inode_area_migration = false
+        self.inode.checkpoint()
+        self.inode_entries_written = written
+        self.inodes_removed = removed
 
     proc unmount(self) -> Bool:
         if not self.mounted:
@@ -524,6 +672,33 @@ class VFS:
         if self.extent != nil and self.extent.btree != nil:
             self.sb.extent_root_blk = self.extent.btree.root_block
             self.sb.extent_generation = self.extent.btree.current_generation
+
+        ## Same for the inode tree, which has its own root and generation and is
+        ## written independently of the extent map.
+        ##
+        ## A volume that has an inode tree is a v1.5 volume, so the version is
+        ## recorded as one. It has to be written here rather than left at whatever
+        ## was read: deserialize gates the root fields on version_minor >= 5, so a
+        ## volume migrated from the area but still stamped 1.4 would have its root
+        ## zeroed again on the next mount, hiding the tree it had just built and
+        ## sending it back to the area -- which by then no longer holds the file
+        ## that had been migrated out of it.
+        if self.itable != nil:
+            self.itable.save_root(self.sb)
+            if self.itable.root_block() != 0:
+                self.sb.version_minor = superblock.SAGEFS_VERSION_MINOR
+
+        ## Write the segment validity bitmap back out, after all allocation has
+        ## finished for this mount. The next mount reads it in mount() and will
+        ## not hand these blocks to anything else. A bitmap that cannot be
+        ## written leaves the previous one in place, which is stale rather than
+        ## correct -- so say so rather than failing the unmount over it.
+        if self.sit_loaded and self.segment != nil:
+            let bs_u = self._init_block_size()
+            let sit_written = self.segment.save_sit(self.image_buf, self.sb.sit_start_blk, bs_u)
+            if sit_written == 0:
+                print("SageFS: segment validity table could not be written; the next mount may " +
+                      "reuse blocks this session allocated.")
 
         let sb_bytes = self.sb.serialize()
         let bs = self._init_block_size()

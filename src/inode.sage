@@ -725,6 +725,21 @@ class InodeManager:
             i = i + 1
         return result
 
+    proc mark_all_dirty(self):
+        ## Mark every in-memory inode dirty.
+        ##
+        ## Used by the v1.5 migration: a volume whose inode metadata came out of
+        ## the fixed area has to be written into the inode B+ tree in full, and
+        ## the tree's contents must be complete before the superblock starts
+        ## pointing at it. Marking everything is the blunt way to guarantee that
+        ## -- it does not depend on the mount loader having noted each inode as it
+        ## read it, and a missed one would be a silently incomplete migration.
+        let keys: Array = dict_keys(self.inodes)
+        var i: Int = 0
+        while i < len(keys):
+            self.dirty_inodes[keys[i]] = true
+            i = i + 1
+
     proc checkpoint(self):
         ## Clear the dirty set after a successful checkpoint write.
         ##

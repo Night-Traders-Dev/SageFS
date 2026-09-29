@@ -270,6 +270,45 @@ class SITEntry:
 
         return buf
 
+    ## Restore this entry from the on-disk form written by serialize().
+    ##
+    ## The bitmap is the part that matters. Without it, every block in every
+    ## segment reads as free after a remount, and the first allocation after
+    ## that hands out a block that the previous session was still using for
+    ## live data. The overwrite is silent: the data's own metadata -- extents,
+    ## inode entries -- is untouched, so the file keeps its length and its
+    ## extents and reads back whatever now occupies its blocks.
+    ##
+    ## The validity count is recomputed from the bitmap rather than trusted.
+    ## The two are written separately, and a torn write can leave them
+    ## disagreeing; the bitmap is the one that is consulted when allocating, so
+    ## it is the one that has to be right.
+    proc deserialize(self, data: Bytes):
+        if bytes_len(data) < SIT_ENTRY_SIZE:
+            return false
+        self.segno = bytes_get(data, 0) | (bytes_get(data, 1) << 8) | (bytes_get(data, 2) << 16) | (bytes_get(data, 3) << 24)
+        ## Clear first, so a short bitmap cannot leave stale bits behind.
+        var i: Int = 0
+        while i < BLOCKS_PER_SEGMENT:
+            self.valid_bitmap[i] = 0
+            i = i + 1
+        var count: Int = 0
+        var byte_idx: Int = 0
+        while byte_idx < 64:
+            let packed = bytes_get(data, 8 + byte_idx)
+            var bit_idx: Int = 0
+            while bit_idx < 8:
+                let bitmap_idx = byte_idx * 8 + bit_idx
+                if bitmap_idx < BLOCKS_PER_SEGMENT:
+                    if (packed & (1 << bit_idx)) != 0:
+                        self.valid_bitmap[bitmap_idx] = 1
+                        count = count + 1
+                bit_idx = bit_idx + 1
+            byte_idx = byte_idx + 1
+        self.valid_blocks = count
+        return true
+
+
     ## Convert this SIT entry to a dictionary for inspection and debugging.
     ##
     ## Returns:
@@ -376,6 +415,88 @@ class SegmentManager:
     ##
     ## Raises:
     ##   Error if segno is out of range.
+    ## Load the on-disk SIT into this manager, so block allocation knows which
+    ## blocks the previous session was using.
+    ##
+    ## This is the step that makes a remount safe. Without it every segment comes
+    ## up with an empty validity bitmap, and the next allocation after a mount
+    ## returns a block that may still hold live file data.
+    ##
+    ## `image` is the whole volume buffer and the SIT lives at
+    ## sit_start_blk * block_size. A short buffer is not an error -- it means the
+    ## volume was formatted before the SIT region was reserved, and it leaves the
+    ## in-memory state alone rather than marking everything free.
+    ##
+    ## Segments holding valid blocks are taken out of the free list, and the
+    ## current-segment cursors are reset. Both are needed: a segment with live
+    ## blocks must never be handed out again, and a stale cursor would keep
+    ## writing into a segment whose remaining free space was computed for a
+    ## previous mount.
+    proc load_sit(self, image: Bytes, sit_start_blk: Int, block_size: Int) -> Int:
+        if sit_start_blk <= 0 or block_size <= 0:
+            return 0
+        let base = sit_start_blk * block_size
+        if base < 0 or base + SIT_ENTRY_SIZE > bytes_len(image):
+            return 0
+        var loaded: Int = 0
+        var segno: Int = 0
+        while segno < self.total_segments:
+            let off = base + segno * SIT_ENTRY_SIZE
+            if off + SIT_ENTRY_SIZE > bytes_len(image):
+                break
+            let entry = self.sit_entries[segno]
+            let chunk = bytes()
+            var i: Int = 0
+            while i < SIT_ENTRY_SIZE:
+                bytes_push(chunk, bytes_get(image, off + i))
+                i = i + 1
+            if entry.deserialize(chunk):
+                loaded = loaded + 1
+            segno = segno + 1
+        ## Rebuild the free list from what the bitmap says.
+        var still_free: Array = []
+        segno = 0
+        while segno < self.total_segments:
+            if self.sit_entries[segno].valid_blocks == 0:
+                push(still_free, segno)
+            segno = segno + 1
+        self.free_segments = still_free
+        ## Force fresh segment assignment on the next allocation.
+        self.current_segments = {
+            "data_hot": -1,
+            "data_warm": -1,
+            "data_cold": -1,
+            "node_hot": -1,
+            "node_warm": -1,
+            "node_cold": -1
+        }
+        return loaded
+
+    ## Write the in-memory SIT back into the volume buffer.
+    ##
+    ## Called from unmount, after all allocation has finished and before the
+    ## image is written out. Returning without writing would leave the on-disk
+    ## bitmap describing an earlier session, which is worse than not having one:
+    ## it would look authoritative while being wrong.
+    proc save_sit(self, image: Bytes, sit_start_blk: Int, block_size: Int) -> Int:
+        if sit_start_blk <= 0 or block_size <= 0:
+            return 0
+        let base = sit_start_blk * block_size
+        if base < 0 or base + self.total_segments * SIT_ENTRY_SIZE > bytes_len(image):
+            return 0
+        var written: Int = 0
+        var segno: Int = 0
+        while segno < self.total_segments:
+            let entry_bytes = self.sit_entries[segno].serialize()
+            let off = base + segno * SIT_ENTRY_SIZE
+            var i: Int = 0
+            while i < SIT_ENTRY_SIZE:
+                bytes_set(image, off + i, bytes_get(entry_bytes, i))
+                i = i + 1
+            written = written + 1
+            segno = segno + 1
+        return written
+
     proc get_entry(self, segno: Int) -> SITEntry:
         if segno < 0 or segno >= self.total_segments:
             raise "SegmentManager.get_entry: segno " + str(segno) + " out of range [0, " + str(self.total_segments - 1) + "]"

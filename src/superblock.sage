@@ -39,7 +39,12 @@ let SAGEFS_MAGIC: Int = 0x53414745
 ##   inode_entry_byte_size and moved the checksum to 448; v1.3 added
 ##   journal_start_blk / journal_block_count and moved the checksum to 464.
 let SAGEFS_VERSION_MAJOR: Int = 1
-let SAGEFS_VERSION_MINOR: Int = 4
+## 1.5 moves inode metadata out of the fixed 32 KiB reserved area and into a
+## B+ tree, recorded at 368/376. v1.4 and earlier volumes have no tree root and
+## are read from the area, then rewritten into the tree by the first unmount --
+## the mount loader decides from inode_root_blk and from whether that block really
+## holds a node, not from the version, so an old volume needs no conversion step.
+let SAGEFS_VERSION_MINOR: Int = 5
 
 ## Default block size in bytes (must be power-of-two, >= 4096)
 let DEFAULT_BLOCK_SIZE: Int = 4096
@@ -765,8 +770,15 @@ proc deserialize_superblock(buf: Bytes) -> SageFSSuperblock:
     sb.main_start_blk   = read_le64(buf, 84)
     sb.uuid         = read_bytes_string(buf, 92, 36)
     sb.label        = read_bytes_string(buf, 128, MAX_LABEL_LEN)
-    sb.inode_root_blk        = read_le64(buf, 368)
-    sb.inode_root_generation  = read_le64(buf, 376)
+    ## v1.5+ inode tree. A v1.4 volume reports zero, which is exactly what the
+    ## mount loader tests for to decide it has to read the reserved area -- so the
+    ## two do not have to agree and an old image needs no rewriting to mount.
+    if sb.version_minor >= 5 and bytes_len(buf) >= 384:
+        sb.inode_root_blk        = read_le64(buf, 368)
+        sb.inode_root_generation  = read_le64(buf, 376)
+    else:
+        sb.inode_root_blk = 0
+        sb.inode_root_generation = 0
     sb.flags        = read_le32(buf, 384)
     sb.checksum_algo  = read_le32(buf, 388)
     sb.compress_algo  = read_le32(buf, 392)
