@@ -39,7 +39,7 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 27/27 files, 745 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
+**Tests: 27/27 files, 759 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
 previously not running at all; see [Known issues](#known-issues) for what is
 still broken.
 
@@ -135,7 +135,7 @@ SageFS integrates Python-like readable and C-like performant SageLang to deliver
     against this implementation
   - No lock-free hot paths, no io_uring
 
-- **Development**: 27 test files, 745 assertions, 6 CLI tools
+- **Development**: 27 test files, 759 assertions, 6 CLI tools
 
 The binary image format uses little-endian encoding with 4 KiB blocks and 512
 blocks per segment. The B+ tree is the exception: its node magic and its keys
@@ -220,7 +220,7 @@ What is missing is a working session setup.
 ### Run Tests
 
 ```bash
-# Full test suite — 27 files, 745 assertions
+# Full test suite — 27 files, 759 assertions
 ./sagemake test
 
 # A single file
@@ -881,8 +881,19 @@ area: it previously checked only the area end, which on a real image was harmles
 because the bytes past the last entry are zero padding, but read past the end of
 a short buffer and produced nil fields.
 
-Not yet done: the inode B+ tree itself, the `_persist_all` and mount-loader
-swap, and the `version_minor` bump to 1.5. The version is deliberately still 1.4
+Also done: `BTreeEngine` can enumerate itself. `scan()` returns every key/value
+pair in ascending key order and `count()` returns the number of them, both walking
+the internal nodes down to every leaf. The inode table needs this at mount, which
+has to load every inode rather than look one up, and so does fsck. `collect_leaves`
+treats an internal node with no pointers as a dead end, matching the guard `search`
+already has for a zeroed root, so damaged metadata cannot send the walk to
+`pointers[-1]`. `test_btree.sage` covers it with 200 keys so the tree has really
+split and the scan has to descend past a single leaf, checks ordering and that
+each value stays with its own key, reopens the tree against the same allocator to
+stand in for reading a saved image, and checks that deletions are reflected.
+
+Not yet done: the inode table itself, the `_persist_all` and mount-loader swap,
+and the `version_minor` bump to 1.5. The version is deliberately still 1.4
 — claiming 1.5 before the tree exists would make the version lie to anyone
 reading the header, and the fallback gate is keyed on it. Until that lands,
 inode metadata is still read from and written to the 32 KiB area, and the new

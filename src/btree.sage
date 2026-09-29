@@ -413,6 +413,59 @@ class BTreeEngine:
 
         return bytes()
 
+    proc collect_leaves(self, node, out: Array):
+        ## Append every leaf under node to out, left to right.
+        ##
+        ## An internal node with no pointers is treated as a dead end rather than
+        ## descended into, matching search()'s handling of a zeroed root. Without
+        ## that guard a damaged root would send us to pointers[-1].
+        if node.is_leaf:
+            push(out, node)
+            return
+        var i: Int = 0
+        while i < len(node.pointers):
+            let child = self.read_node(node.pointers[i].block_addr)
+            self.collect_leaves(child, out)
+            i = i + 1
+
+    proc scan(self) -> Array:
+        ## Return every (key, data) pair in the tree, in ascending key order.
+        ##
+        ## Needed by anything that has to enumerate a whole index rather than
+        ## look one key up: the inode table at mount has to load every inode, and
+        ## fsck has to walk them all. Returns an empty array for an empty tree.
+        if self.root_block == 0:
+            return []
+        var leaves: Array = []
+        self.collect_leaves(self.read_node(self.root_block), leaves)
+        var out: Array = []
+        var li: Int = 0
+        while li < len(leaves):
+            let leaf = leaves[li]
+            var i: Int = 0
+            while i < leaf.num_items:
+                let item = leaf.items[i]
+                let val = bytes()
+                for j in range(item.data_size):
+                    bytes_push(val, bytes_get(leaf.data_area, item.data_offset + j))
+                push(out, {"key": item.key, "data": val})
+                i = i + 1
+            li = li + 1
+        return out
+
+    proc count(self) -> Int:
+        ## Number of key/value pairs in the tree.
+        if self.root_block == 0:
+            return 0
+        var leaves: Array = []
+        self.collect_leaves(self.read_node(self.root_block), leaves)
+        var n: Int = 0
+        var li: Int = 0
+        while li < len(leaves):
+            n = n + leaves[li].num_items
+            li = li + 1
+        return n
+
     proc insert(self, key, data: Bytes):
         if self.root_block == 0:
             let root = BTreeNode()

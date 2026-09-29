@@ -257,6 +257,74 @@ proc test_cow():
     let result_gen2_2 = tree2.search(make_key(2))
     check_bytes("gen2 tree has key 2 (new)", result_gen2_2, bytes("gen2"))
 
+proc check_count(name: String, got, want):
+    TESTS_RUN = TESTS_RUN + 1
+    if got == want:
+        TESTS_PASSED = TESTS_PASSED + 1
+        print("  PASS  " + name)
+    else:
+        print("  FAIL  " + name + "  got=" + str(got) + " expected=" + str(want))
+
+proc test_scan():
+    print("")
+    print("Scan and count:")
+    let alloc = MockAllocator()
+
+    ## An empty tree must report empty rather than trying to read a root.
+    let empty_tree = BTreeEngine(alloc, 0, 1)
+    check_count("empty tree scans to nothing", len(empty_tree.scan()), 0)
+    check_count("empty tree counts zero", empty_tree.count(), 0)
+
+    ## A single leaf. This is the case that would also pass with a scan that only
+    ## ever looked at the root, so it is a floor and not evidence of anything.
+    let one = BTreeEngine(alloc, 0, 1)
+    one.insert(make_key(7), make_data(7))
+    check_count("single leaf count", one.count(), 1)
+    check_count("single leaf scan length", len(one.scan()), 1)
+    check_bytes("single leaf value", one.scan()[0]["data"], make_data(7))
+
+    ## Enough keys to force a split, so the scan has to descend through an
+    ## internal node and visit more than one leaf. BTREE_MAX_KEYS is 84.
+    let many = BTreeEngine(alloc, 0, 1)
+    var i: Int = 0
+    var expected: Int = 0
+    while i < 200:
+        many.insert(make_key(i), make_data(i))
+        expected = expected + 1
+        i = i + 1
+    check_count("200-key tree counts every key", many.count(), expected)
+    let rows = many.scan()
+    check_count("200-key scan returns every key", len(rows), expected)
+
+    ## Ascending key order, with each value still attached to its own key.
+    var ordered = true
+    var paired = true
+    var j: Int = 0
+    while j < len(rows):
+        if rows[j]["key"].offset != j:
+            ordered = false
+        if not bytes_equal(rows[j]["data"], make_data(j)):
+            paired = false
+        j = j + 1
+    check_count("scan is in ascending key order", ordered, true)
+    check_count("each value stays with its key", paired, true)
+
+    ## A reopen against the same allocator must see the same set, which is the
+    ## closest stand-in here for reading a saved image back.
+    let reopened = BTreeEngine(alloc, many.root_block, many.current_generation)
+    check_count("reopened tree counts the same", reopened.count(), expected)
+    check_count("reopened scan matches", len(reopened.scan()), expected)
+    check_bytes("reopened value readable", reopened.search(make_key(99)), make_data(99))
+
+    ## Deletions must show up in both.
+    var k: Int = 0
+    while k < 200:
+        many.delete(make_key(k))
+        expected = expected - 1
+        k = k + 1
+    check_count("count after deleting every key", many.count(), 0)
+    check_count("scan after deleting every key", len(many.scan()), 0)
+
 proc main():
     print("=== SageFS B+ Tree Engine Tests ===")
     test_insert_search_single()
@@ -266,6 +334,7 @@ proc main():
     test_merge()
     test_serialization()
     test_cow()
+    test_scan()
     print("")
     print("Results: " + str(TESTS_PASSED) + "/" + str(TESTS_RUN) + " passed")
     if TESTS_PASSED == TESTS_RUN:
