@@ -3,6 +3,17 @@ import math
 import sys
 
 let BTREE_NODE_SIZE: Int = 4096
+## The node tag, stored big-endian. This is the one deliberate departure from the
+## little-endian rule every other on-disk integer follows.
+##
+## It is a tag, not data: it is written and read with the same helper, so nothing
+## is ever misread, and it exists to be recognised rather than interpreted. Every
+## actual field below -- level, generation, owner_nid, the item and pointer
+## tables -- is little-endian, as is the hand-packed inode entry in imgio.sage.
+##
+## Reordering this would invalidate existing images and is a format change, not a
+## cleanup. testing/test_endianness.sage asserts the byte layout of the data
+## fields so the convention cannot drift silently; the tag is left alone.
 let BTREE_MAGIC: Int = 0x42545245
 let BTREE_MAX_KEYS: Int = 84
 let BTREE_MIN_KEYS: Int = 42
