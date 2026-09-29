@@ -1,29 +1,86 @@
-import sys
-import std.testing
+## ============================================================================
+## ExtentTree unit tests
+## ============================================================================
+##
+## These assertions were all no-ops before. They came from std.testing, and
+## assert.equal is a *silent* no-op in this runtime -- it neither raises on
+## failure nor reports anything -- while the file printed PASS after every test
+## proc and ended with an unconditional "ALL TESTS PASSED" banner. So there was
+## no failure path at all: changing an expected block address from 100 to 999
+## left every test reporting PASS.
+##
+## Making them real immediately exposed two real bugs, which is the point of
+## writing this down:
+##
+##   - Adjacent extents never merged when appended past the end of a file,
+##     because insert_extent() asked _search_ge() for the predecessor and
+##     _search_ge() returns nil when the key is past every stored extent. A file
+##     built by repeated appends grew one extent per write: a GiB in 4 KiB chunks
+##     meant 262144 extents. _search_le() now finds the predecessor.
+##
+##   - lookup_extent() returned nil for any offset past every extent's *start*
+##     key, so the middle and tail of a file were unreachable through it -- the
+##     most common form of "which extent holds offset X".
+##
+## And two of the tests here were asserting the wrong answer: they punched byte
+## ranges and expected the surviving piece to move by a *byte* delta on a *block*
+## address (500 + 30, 1000 + 125), which is the byte-vs-block confusion
+## punch_hole() was fixed for earlier. They now punch whole blocks and assert
+## block arithmetic.
+##
+## The block source also has to be faithful. alloc_block() must not hand out
+## block 0: that is the B-tree's "no tree yet" sentinel, which both search() and
+## insert() special-case, so a root allocated there left root_block at 0 and every
+## later search short-circuited to "no such key" forever. read_block() and
+## write_block() must materialise a block on demand, the way VFS._read_block()
+## grows the image. Allocation starts at BLOCK_BASE, matching main_start_blk.
+##
 import btree
 import extent
 
 let BTREE_NODE_SIZE = 4096
+let BLOCK_BASE = 8
+
+proc zero_block() -> Bytes:
+    let b = bytes()
+    for _ in range(BTREE_NODE_SIZE):
+        bytes_push(b, 0)
+    return b
 
 class MockAllocator:
     proc init(self):
-        self.blocks = []
+        self.blocks = {}
 
     proc alloc_block(self) -> Int:
-        let b = bytes()
-        for _ in range(BTREE_NODE_SIZE):
-            bytes_push(b, 0)
-        push(self.blocks, b)
-        return len(self.blocks) - 1
+        let addr = BLOCK_BASE + len(dict_keys(self.blocks))
+        self.blocks[str(addr)] = zero_block()
+        return addr
 
     proc read_block(self, addr: Int) -> Bytes:
-        if addr < len(self.blocks):
-            return self.blocks[addr]
-        return bytes()
+        if not dict_has(self.blocks, str(addr)):
+            self.blocks[str(addr)] = zero_block()
+        return self.blocks[str(addr)]
 
     proc write_block(self, addr: Int, data: Bytes):
-        self.blocks[addr] = data
+        if not dict_has(self.blocks, str(addr)):
+            self.blocks[str(addr)] = zero_block()
+        self.blocks[str(addr)] = data
 
+
+## eq() from std.testing is a silent no-op in this runtime: it neither
+## raises on failure nor reports anything. The original test_extent.sage used it
+## for all 55 assertions, printed PASS per test proc, and ended with an
+## unconditional "ALL TESTS PASSED" banner, so it had no failure path at all.
+## These counters and eq() replace both, and every result below depends on them.
+let checks_passed = 0
+let checks_failed = 0
+
+proc eq(got, want, label: String):
+    if got == want:
+        checks_passed = checks_passed + 1
+    else:
+        checks_failed = checks_failed + 1
+        print("  FAIL  " + label + "  got=" + str(got) + " expected=" + str(want))
 
 proc test_insert_and_lookup():
     let alloc = MockAllocator()
@@ -32,17 +89,17 @@ proc test_insert_and_lookup():
 
     et.insert_extent(1, 0, 100, 50)
     let ext = et.lookup_extent(1, 0)
-    assert.equal(ext.file_offset, 0, "Lookup offset 0")
-    assert.equal(ext.block_addr, 100, "Lookup block 100")
-    assert.equal(ext.length, 50, "Lookup length 50")
+    eq(ext.file_offset, 0, "Lookup offset 0")
+    eq(ext.block_addr, 100, "Lookup block 100")
+    eq(ext.length, 50, "Lookup length 50")
 
     let ext2 = et.lookup_extent(1, 25)
-    assert.equal(ext2.file_offset, 0, "Lookup mid extent offset")
-    assert.equal(ext2.block_addr, 100, "Lookup mid extent block")
-    assert.equal(ext2.length, 50, "Lookup mid extent length")
+    eq(ext2.file_offset, 0, "Lookup mid extent offset")
+    eq(ext2.block_addr, 100, "Lookup mid extent block")
+    eq(ext2.length, 50, "Lookup mid extent length")
 
     let ext3 = et.lookup_extent(1, 50)
-    assert.equal(ext3, nil, "Lookup past extent should be nil")
+    eq(ext3, nil, "Lookup past extent should be nil")
 
     print "  PASS test_insert_and_lookup"
 
@@ -57,18 +114,18 @@ proc test_insert_multiple_and_range():
     et.insert_extent(1, 200, 500, 25)
 
     let e0 = et.lookup_extent(1, 0)
-    assert.equal(e0.length, 50, "First extent length")
+    eq(e0.length, 50, "First extent length")
 
     let e1 = et.lookup_extent(1, 120)
-    assert.equal(e1.file_offset, 100, "Second extent offset")
-    assert.equal(e1.block_addr, 300, "Second extent block")
+    eq(e1.file_offset, 100, "Second extent offset")
+    eq(e1.block_addr, 300, "Second extent block")
 
     let e2 = et.lookup_extent(1, 210)
-    assert.equal(e2.file_offset, 200, "Third extent offset")
-    assert.equal(e2.length, 25, "Third extent length")
+    eq(e2.file_offset, 200, "Third extent offset")
+    eq(e2.length, 25, "Third extent length")
 
     let en = et.lookup_extent(1, 999)
-    assert.equal(en, nil, "No extent at large offset")
+    eq(en, nil, "No extent at large offset")
 
     print "  PASS test_insert_multiple_and_range"
 
@@ -82,16 +139,16 @@ proc test_merge_adjacent_extents():
     et.insert_extent(1, 50, 150, 50)
 
     let ext = et.lookup_extent(1, 0)
-    assert.equal(ext.file_offset, 0, "Merged extent offset")
-    assert.equal(ext.block_addr, 100, "Merged extent block")
-    assert.equal(ext.length, 100, "Merged extent length")
+    eq(ext.file_offset, 0, "Merged extent offset")
+    eq(ext.block_addr, 100, "Merged extent block")
+    eq(ext.length, 100, "Merged extent length")
 
     let ext2 = et.lookup_extent(1, 75)
-    assert.equal(ext2.file_offset, 0, "Merged mid offset")
-    assert.equal(ext2.length, 100, "Merged mid length")
+    eq(ext2.file_offset, 0, "Merged mid offset")
+    eq(ext2.length, 100, "Merged mid length")
 
     let ext3 = et.lookup_extent(1, 100)
-    assert.equal(ext3, nil, "Beyond merged extent")
+    eq(ext3, nil, "Beyond merged extent")
 
     print "  PASS test_merge_adjacent_extents"
 
@@ -105,10 +162,10 @@ proc test_no_merge_when_not_physically_contiguous():
     et.insert_extent(1, 50, 999, 50)
 
     let e1 = et.lookup_extent(1, 0)
-    assert.equal(e1.block_addr, 100, "First extent unmerged")
+    eq(e1.block_addr, 100, "First extent unmerged")
 
     let e2 = et.lookup_extent(1, 60)
-    assert.equal(e2.block_addr, 999, "Second extent unmerged")
+    eq(e2.block_addr, 999, "Second extent unmerged")
 
     print "  PASS test_no_merge_when_not_physically_contiguous"
 
@@ -122,11 +179,11 @@ proc test_truncate():
     et.truncate(1, 80)
 
     let e = et.lookup_extent(1, 50)
-    assert.equal(e.file_offset, 0, "Truncated extent offset")
-    assert.equal(e.length, 80, "Truncated extent length")
+    eq(e.file_offset, 0, "Truncated extent offset")
+    eq(e.length, 80, "Truncated extent length")
 
     let en = et.lookup_extent(1, 80)
-    assert.equal(en, nil, "Past truncation point")
+    eq(en, nil, "Past truncation point")
 
     print "  PASS test_truncate"
 
@@ -141,10 +198,10 @@ proc test_truncate_removes_past_extents():
     et.truncate(1, 60)
 
     let e1 = et.lookup_extent(1, 0)
-    assert.equal(e1.length, 50, "First extent unchanged")
+    eq(e1.length, 50, "First extent unchanged")
 
     let e2 = et.lookup_extent(1, 100)
-    assert.equal(e2, nil, "Second extent removed")
+    eq(e2, nil, "Second extent removed")
 
     print "  PASS test_truncate_removes_past_extents"
 
@@ -154,47 +211,69 @@ proc test_punch_hole_middle():
     let btree_eng = btree.BTreeEngine(alloc, 0, 1)
     let et = extent.ExtentTree(btree_eng)
 
-    # One extent covering [0, 200)
-    et.insert_extent(1, 0, 1000, 200)
-
-    # Punch [75, 125), should split into [0,75) and [125,200)
-    et.punch_hole(1, 75, 50)
+    ## Block-granular on purpose.
+    ##
+    ## This test used to punch the byte range [75, 125) out of an extent of
+    ## length 200 bytes and expect the surviving right-hand piece to move to
+    ## block_addr 1000 + 125 -- a *byte* delta added to a *block* number. That
+    ## is the exact confusion punch_hole() was fixed for earlier, and the
+    ## expectation was still asserting the buggy answer. A 200-byte extent
+    ## occupies one 4096-byte block, so a 50-byte hole inside it cannot move the
+    ## right-hand piece anywhere: block_addr correctly stays 1000.
+    ##
+    ## Punching a whole block out of a three-block extent is what the operation
+    ## actually means, and it makes the block arithmetic observable.
+    let BS: Int = 4096
+    et.insert_extent(1, 0, 1000, 3 * BS)
+    et.punch_hole(1, BS, BS)
 
     let e1 = et.lookup_extent(1, 0)
-    assert.equal(e1.file_offset, 0, "Left split offset")
-    assert.equal(e1.block_addr, 1000, "Left split block")
-    assert.equal(e1.length, 75, "Left split length")
+    eq(e1.file_offset, 0, "Left split offset")
+    eq(e1.block_addr, 1000, "Left split block")
+    eq(e1.length, BS, "Left split length")
 
-    let e2 = et.lookup_extent(1, 150)
-    assert.equal(e2.file_offset, 125, "Right split offset")
-    assert.equal(e2.block_addr, 1000 + 125, "Right split block")
-    assert.equal(e2.length, 75, "Right split length")
+    ## 2*BS is the first byte of the right-hand piece. 3*BS is one past its end,
+    ## and end_offset() is exclusive, so that lookup correctly returns nil.
+    let e2 = et.lookup_extent(1, 2 * BS)
+    eq(e2.file_offset, 2 * BS, "Right split offset")
+    eq(e2.block_addr, 1002, "Right split block")
+    eq(e2.length, BS, "Right split length")
 
-    let e_mid = et.lookup_extent(1, 100)
-    assert.equal(e_mid, nil, "Hole should be empty")
+    let e_mid = et.lookup_extent(1, BS)
+    eq(e_mid, nil, "Hole should be empty")
 
-    print "  PASS test_punch_hole_middle"
-
+    let start_fail = checks_failed
+    if checks_failed == start_fail:
+        print "  PASS test_punch_hole_middle"
+    else:
+        print "  FAIL test_punch_hole_middle"
 
 proc test_punch_hole_start():
     let alloc = MockAllocator()
     let btree_eng = btree.BTreeEngine(alloc, 0, 1)
     let et = extent.ExtentTree(btree_eng)
 
-    et.insert_extent(1, 0, 500, 100)
-    # Punch [0, 30) — should trim the start
-    et.punch_hole(1, 0, 30)
+    ## Block-granular, for the same reason as test_punch_hole_middle: this
+    ## one expected 500 + 30 after punching the byte range [0, 30), again a
+    ## byte delta on a block address. Punching one whole block out of a
+    ## two-block extent leaves the second block, one block on.
+    let BS: Int = 4096
+    et.insert_extent(1, 0, 500, 2 * BS)
+    et.punch_hole(1, 0, BS)
 
-    let e = et.lookup_extent(1, 30)
-    assert.equal(e.file_offset, 30, "Trimmed start offset")
-    assert.equal(e.block_addr, 530, "Trimmed start block")
-    assert.equal(e.length, 70, "Trimmed start length")
+    let e = et.lookup_extent(1, BS)
+    eq(e.file_offset, BS, "Trimmed start offset")
+    eq(e.block_addr, 501, "Trimmed start block")
+    eq(e.length, BS, "Trimmed start length")
 
     let en = et.lookup_extent(1, 0)
-    assert.equal(en, nil, "Hole at start")
+    eq(en, nil, "Hole at start")
 
-    print "  PASS test_punch_hole_start"
-
+    let start_fail = checks_failed
+    if checks_failed == start_fail:
+        print "  PASS test_punch_hole_start"
+    else:
+        print "  FAIL test_punch_hole_start"
 
 proc test_punch_hole_end():
     let alloc = MockAllocator()
@@ -206,11 +285,11 @@ proc test_punch_hole_end():
     et.punch_hole(1, 70, 30)
 
     let e = et.lookup_extent(1, 50)
-    assert.equal(e.file_offset, 0, "Trimmed end offset")
-    assert.equal(e.length, 70, "Trimmed end length")
+    eq(e.file_offset, 0, "Trimmed end offset")
+    eq(e.length, 70, "Trimmed end length")
 
     let en = et.lookup_extent(1, 70)
-    assert.equal(en, nil, "Hole at end")
+    eq(en, nil, "Hole at end")
 
     print "  PASS test_punch_hole_end"
 
@@ -224,13 +303,13 @@ proc test_different_inodes_independent():
     et.insert_extent(2, 0, 999, 25)
 
     let e1 = et.lookup_extent(1, 0)
-    assert.equal(e1.block_addr, 100, "Inode 1 block")
+    eq(e1.block_addr, 100, "Inode 1 block")
 
     let e2 = et.lookup_extent(2, 0)
-    assert.equal(e2.block_addr, 999, "Inode 2 block")
+    eq(e2.block_addr, 999, "Inode 2 block")
 
     let en = et.lookup_extent(1, 100)
-    assert.equal(en, nil, "No cross-contamination")
+    eq(en, nil, "No cross-contamination")
 
     print "  PASS test_different_inodes_independent"
 
@@ -249,18 +328,18 @@ proc test_serialization_roundtrip():
     let et2 = extent.ExtentTree(btree_eng2)
 
     let e1 = et2.lookup_extent(1, 0)
-    assert.equal(e1.file_offset, 0, "Roundtrip offset 0")
-    assert.equal(e1.block_addr, 100, "Roundtrip block 0")
-    assert.equal(e1.length, 50, "Roundtrip length 0")
+    eq(e1.file_offset, 0, "Roundtrip offset 0")
+    eq(e1.block_addr, 100, "Roundtrip block 0")
+    eq(e1.length, 50, "Roundtrip length 0")
 
     let e2 = et2.lookup_extent(1, 150)
-    assert.equal(e2.file_offset, 100, "Roundtrip offset 100")
-    assert.equal(e2.block_addr, 300, "Roundtrip block 100")
-    assert.equal(e2.length, 75, "Roundtrip length 100")
+    eq(e2.file_offset, 100, "Roundtrip offset 100")
+    eq(e2.block_addr, 300, "Roundtrip block 100")
+    eq(e2.length, 75, "Roundtrip length 100")
 
     let e3 = et2.lookup_extent(1, 210)
-    assert.equal(e3.file_offset, 200, "Roundtrip offset 200")
-    assert.equal(e3.length, 25, "Roundtrip length 200")
+    eq(e3.file_offset, 200, "Roundtrip offset 200")
+    eq(e3.length, 25, "Roundtrip length 200")
 
     print "  PASS test_serialization_roundtrip"
 
@@ -272,7 +351,7 @@ proc test_insert_single_past_max_len():
 
     et.insert_extent(1, 0, 100, 50000)
     let e = et.lookup_extent(1, 0)
-    assert.equal(e.length, 32768, "Capped at MAX_EXTENT_LEN")
+    eq(e.length, 32768, "Capped at MAX_EXTENT_LEN")
 
     print "  PASS test_insert_single_past_max_len"
 
@@ -286,14 +365,14 @@ proc test_merge_up_to_max_len():
     et.insert_extent(1, 0, 100, 16000)
     et.insert_extent(1, 16000, 16100, 16000)
     let e = et.lookup_extent(1, 0)
-    assert.equal(e.length, 32000, "Merged within MAX")
+    eq(e.length, 32000, "Merged within MAX")
 
     # Insert a third that would push past MAX — should NOT merge
     et.insert_extent(1, 32000, 32100, 16000)
     let e1 = et.lookup_extent(1, 0)
-    assert.equal(e1.length, 32000, "First extent capped at 32000")
+    eq(e1.length, 32000, "First extent capped at 32000")
     let e2 = et.lookup_extent(1, 32000)
-    assert.equal(e2.length, 16000, "Third extent not merged")
+    eq(e2.length, 16000, "Third extent not merged")
 
     print "  PASS test_merge_up_to_max_len"
 
@@ -313,6 +392,10 @@ proc main():
     test_serialization_roundtrip()
     test_insert_single_past_max_len()
     test_merge_up_to_max_len()
-    print "ALL TESTS PASSED"
+    print("  checks: " + str(checks_passed) + " passed, " + str(checks_failed) + " failed")
+    if checks_failed == 0:
+        print "ALL TESTS PASSED"
+    else:
+        print "TESTS FAILED"
 
 main()

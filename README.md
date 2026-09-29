@@ -39,7 +39,7 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 25/25 files, 654 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
+**Tests: 25/25 files, 696 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
 previously not running at all; see [Known issues](#known-issues) for what is
 still broken.
 
@@ -135,7 +135,7 @@ SageFS integrates Python-like readable and C-like performant SageLang to deliver
     against this implementation
   - No lock-free hot paths, no io_uring
 
-- **Development**: 25 test files, 654 assertions, 6 CLI tools
+- **Development**: 25 test files, 696 assertions, 6 CLI tools
 
 The binary image format uses little-endian encoding with 4 KiB blocks and 512
 blocks per segment. The B+ tree is the exception: its node magic and its keys
@@ -220,7 +220,7 @@ What is missing is a working session setup.
 ### Run Tests
 
 ```bash
-# Full test suite — 25 files, 654 assertions
+# Full test suite — 25 files, 696 assertions
 ./sagemake test
 
 # A single file
@@ -731,55 +731,38 @@ bytecode VM specifically, when the defect was neither. Renaming empty
 directories, non-empty directories and cross-directory moves are all now pinned
 in `testing/test_sparse_and_rename.sage` and pass in both runtimes.
 
-**21. `testing/test_extent.sage` verifies nothing.** Its 55 `assert.equal()`
-calls come from `std.testing`, and in this runtime `assert.equal` is a **silent
-no-op** — it neither raises on failure nor reports anything. The file also
-printed `PASS` after every test proc and an unconditional `ALL TESTS PASSED`
-banner, so there was no failure path at all.
-
-Confirmed by mutation: changing an expected block address from 100 to 999 left
-every test reporting `PASS` and the banner unchanged.
+**21. ~~`testing/test_extent.sage` verified nothing.~~ Fixed.** Its 55
+`assert.equal()` calls came from `std.testing`, and in this runtime `assert.equal`
+is a **silent no-op** — it neither raises on failure nor reports anything. The
+file also printed `PASS` after every test proc and ended with an unconditional
+`ALL TESTS PASSED` banner, so there was no failure path at all. Confirmed by
+mutation: changing an expected block address from 100 to 999 left every test
+reporting `PASS`.
 
 Replacing the assertions with real comparisons immediately exposed how much was
-hidden: **39 of the 55 were failing**, all reading `got=nil`.
+hidden — 39 of the 55 were failing, all reading `got=nil`. Three distinct causes,
+all now fixed:
 
-The cause is in the test's block source, not in the extent tree.
-`MockAllocator.alloc_block()` returned `len(self.blocks) - 1`, so the **first
-block it ever handed out was block 0** — and block 0 is the B-tree's "no tree
-yet" sentinel, which `BTreeEngine.search()` and `insert()` both special-case with
-`if self.root_block == 0`. The engine lazily created its root on that block,
-`root_block` stayed 0, and every subsequent search short-circuited to "no such
-key" forever. So the tree never held anything and every lookup returned nothing.
+- **The mock handed out block 0.** `alloc_block()` returned
+  `len(self.blocks) - 1`, so the first block it ever allocated was block 0 — the
+  B-tree's "no tree yet" sentinel, which both `search()` and `insert()`
+  special-case. The engine created its root there, `root_block` stayed 0, and
+  every later search short-circuited to "no such key" forever. Note that
+  `BTreeEngine(alloc, 0, 1)` is *correct* for a fresh tree; the mock was wrong,
+  not the root. Allocation now starts at `BLOCK_BASE = 8`, matching
+  `main_start_blk`.
+- **The mock did not materialise blocks.** `read_block()` returned an empty buffer
+  for any address it had not been given, where `VFS._read_block()` grows the
+  image on demand. Both `read_block()` and `write_block()` now materialise.
+- **Two tests asserted the wrong answer.** They punched *byte* ranges and expected
+  the surviving extent to move by a *byte* delta on a *block* address
+  (`500 + 30`, `1000 + 125`) — the exact confusion `punch_hole()` was fixed for
+  earlier. A 200-byte extent occupies one 4096-byte block, so a 50-byte hole
+  inside it cannot move the right-hand piece anywhere; `block_addr` correctly
+  stayed put. Both tests now punch whole blocks and assert block arithmetic.
 
-Note that `BTreeEngine(alloc, 0, 1)` is *correct* for a fresh tree: root block 0
-means uninitialised, and `insert()` allocates the real root on first use. The
-mock, not the root, was wrong. The mock also returned an empty buffer from
-`read_block()` for any address it had not been given, where
-`VFS._read_block()` materialises on demand.
-
-With a base-offset allocator (starting at 8, matching the VFS's `main_start_blk`),
-on-demand materialisation, and real assertions, **34 of the 55 pass** and 21
-still fail, the rest clustered around a second extent at the same offset and
-around `punch_hole` trimming. Finishing this needs the remaining divergence
-between the mock and the tree worked out.
-
-Because that is not done, `testing/test_extent.sage` is left as it was rather than
-shipped red. The rebuilt harness is preserved as **`testing/extent_harness.sage`**,
-deliberately outside the `test_*.sage` glob so `sagemake test` does not pick it
-up: real assertions instead of the no-op `assert.equal`, the corrected block
-source, per-proc results and a final banner that both depend on the counts. It
-reproduces 34 passed / 21 failed and can be run directly with
-`sage-c -I src testing/extent_harness.sage`.
-
-Verified working in that harness: insert, lookup of two extents at different file
-offsets, and `_collect_extents`. The block-0 sentinel bug is fixed.
-
-Still failing, clustered three ways — lookups landing in the *middle* of a stored
-extent (several `nil`); the `MAX_EXTENT_LEN` cases, which come out capped at
-16000 rather than 32000, so something halves the cap, possibly a `data_area` or
-`BTREE_MAX_KEYS` limit interacting with `split()`; and `punch_hole` trimming,
-where one expected block address is off. The production extent path is not in
-doubt: the write, truncate, punch_hole and remount suites all exercise it.
+The file is back in the suite at **55 of 55 real assertions**, and making it
+honest is what found the two extent bugs in the two issues below.
 
 **22. Appended extents never merged.** Fixed. `insert_extent()` decided whether to
 merge with the extent on the left by asking `_search_ge()` for the item before the
@@ -798,7 +781,16 @@ written in 4 KiB chunks accumulated 262144 extents of 24 bytes plus keys in the
 B+ tree, and `MAX_EXTENT_LEN` never capped anything. Caught by the rebuilt extent
 harness, in `test_merge_up_to_max_len`.
 
-**23. A root block of zeros crashed the B-tree instead of reading as empty.**
+**23. `lookup_extent()` could not find the middle or tail of a file.** Fixed, and
+found by the same rebuilt harness. It asked `_search_ge()` for the first extent
+*starting at or after* the offset and returned nil when there was none — but the
+usual question is "which extent *contains* offset X", and for any X past every
+extent's start key there is none, so the call reported no such extent for a file
+that plainly had one. The successor branch was only ever reached when a successor
+existed, which left the tail of every file unreachable through this call. It now
+falls back to the predecessor via `_search_le()` and checks containment.
+
+**24. A root block of zeros crashed the B-tree instead of reading as empty.**
 Fixed. `BTreeEngine.search()` walked `while not current.is_leaf`, and a root
 block of zeros — a freshly formatted volume, or damaged metadata —
 deserialises with `is_leaf = false`, no items and no pointers. The index

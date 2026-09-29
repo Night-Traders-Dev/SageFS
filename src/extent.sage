@@ -291,6 +291,27 @@ class ExtentTree:
     proc lookup_extent(self, ino: Int, file_offset: Int) -> Extent:
         let sgr = self._search_ge(self._key(ino, file_offset))
         if sgr == nil:
+            ## No extent *starts* at or after file_offset, so the only candidate is
+            ## the last extent, which may well contain the offset.
+            ##
+            ## This returned nil outright. The common case of "which extent holds
+            ## offset X" is a lookup into the middle or tail of the last stored
+            ## extent -- an offset past every extent's start key -- and every one
+            ## of those reported "no such extent" for a file that plainly had one.
+            ## The successor branch below only runs when _search_ge() found a
+            ## successor to point at, so the tail of the file was unreachable
+            ## through this call.
+            let prev_loc = self._search_le(self._key(ino, file_offset))
+            if prev_loc == nil:
+                return nil
+            let pleaf = prev_loc["leaf"]
+            let pidx = prev_loc["idx"]
+            if pidx >= 0 and pidx < pleaf.num_items:
+                let pitem = pleaf.items[pidx]
+                if pitem.key.object_id == ino and pitem.key.type == EXTENT_ITEM:
+                    let pext = extent_from_bytes(self._read_data(pleaf, pitem))
+                    if pext.file_offset <= file_offset and pext.end_offset() > file_offset:
+                        return pext
             return nil
         let leaf = sgr.leaf
         let idx = sgr.idx
