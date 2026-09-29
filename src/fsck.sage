@@ -186,14 +186,20 @@ class Fsck:
             if not entry.is_alive():
                 continue
             let blk: Int = entry.block_addr
-            ## Divided by the SIT's own segment geometry, not sb.segment_size. The
-            ## allocator picks an offset with SITEntry.find_free_block(), so the
-            ## bit index inside a segment only means anything relative to the
-            ## 512-bit bitmap the SIT is built on. Deriving it from the superblock
-            ## instead silently audits a different bit whenever the two disagree.
-            let geom: Int = len(self.sit.get_entry(0).valid_bitmap)
-            let segno: Int = blk / geom
-            let offset: Int = blk % geom
+            ## Asked of the segment manager rather than recomputed here. A NAT
+            ## block_addr is absolute, and the manager that produced it defines
+            ## the mapping:
+            ##
+            ##     physical = main_start_blk + segno * BLOCKS_PER_SEGMENT + offset
+            ##
+            ## so the inverse needs the main_start_blk term and the manager's own
+            ## blocks_per_segment. Recomputing it here is how this check ended up
+            ## dividing a block address that still had the metadata area folded
+            ## into it, and reporting a mismatch on a healthy volume. There is one
+            ## owner of that arithmetic and it is not fsck.
+            let loc: Dict = self.sit.get_block_location(blk)
+            let segno: Int = loc["segno"]
+            let offset: Int = loc["block_offset"]
             let sit_entry: Any = self.sit.get_entry(segno)
             if sit_entry == nil:
                 report.add(FsckIssue(ISSUE_NAT_SIT_MISMATCH, SEV_ERROR, entry.nid, "nid points at block in unknown segment " + str(segno)))

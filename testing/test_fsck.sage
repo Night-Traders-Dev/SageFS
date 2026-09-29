@@ -150,21 +150,12 @@ for iss in real_sit_report.issues:
 ## The mount really does have a segment manager, which is the wiring that was
 ## missing.
 check("the mount really does have a segment manager", fs.segment != nil, true)
-## KNOWN: this is 1, from ISSUE_NAT_SIT_MISMATCH, and it should be 0. It appeared
-## only once fsck was actually handed a SIT, which is what these changes did.
-##
-## It is not the count check. sit_entries carry a fixed 512-block segment -- the
-## bitmap is 512 bits, serialize packs them into 64 bytes -- while segment_size in
-## the superblock is an independent field, and this volume sets it to 8. Both
-## checks used the superblock's value where the SIT's own geometry was meant, and
-## have been corrected to use the bitmap. The count check is clean as a result;
-## the mismatch check still fires, so the outstanding question is how a NAT
-## block_addr maps to a (segment, bit) pair -- the allocator chooses its bit with
-## SITEntry.find_free_block(), so the mapping is not necessarily blk % 512.
-##
-## Asserting 1 here would enshrine the bug as expected, and asserting 0 would
-## fail. Left unchecked on purpose until the mapping is traced.
+## Both were wrong before, in the same way: the check derived a (segment, bit)
+## pair from an absolute block address without undoing main_start_blk, so it was
+## reading a bit that had nothing to do with the block the NAT actually points at.
 check("no SIT count issues on a healthy volume", sit_issues - n_nat_mismatch, 0)
+check("no NAT/SIT mismatches on a healthy volume", n_nat_mismatch, 0)
+check("a healthy volume reports no SIT issues at all", sit_issues, 0)
 
 let real: Any = fsck_module.Fsck(sb, fs.inode, nil, nil, nil, false)
 let clean_report = real.run()
