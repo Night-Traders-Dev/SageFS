@@ -186,8 +186,14 @@ class Fsck:
             if not entry.is_alive():
                 continue
             let blk: Int = entry.block_addr
-            let segno: Int = blk / self.sb.segment_size
-            let offset: Int = blk % self.sb.segment_size
+            ## Divided by the SIT's own segment geometry, not sb.segment_size. The
+            ## allocator picks an offset with SITEntry.find_free_block(), so the
+            ## bit index inside a segment only means anything relative to the
+            ## 512-bit bitmap the SIT is built on. Deriving it from the superblock
+            ## instead silently audits a different bit whenever the two disagree.
+            let geom: Int = len(self.sit.get_entry(0).valid_bitmap)
+            let segno: Int = blk / geom
+            let offset: Int = blk % geom
             let sit_entry: Any = self.sit.get_entry(segno)
             if sit_entry == nil:
                 report.add(FsckIssue(ISSUE_NAT_SIT_MISMATCH, SEV_ERROR, entry.nid, "nid points at block in unknown segment " + str(segno)))
@@ -212,9 +218,18 @@ class Fsck:
             if entry == nil:
                 continue
             ## Recompute the popcount of the valid bitmap.
+            ##
+            ## Bounded by the bitmap's own length, not by sb.segment_size. The SIT
+            ## on-disk format has a fixed 512-block segment -- the bitmap is 512
+            ## bits and serialize packs them into 64 bytes -- while segment_size in
+            ## the superblock is an independent field. Where the two disagree this
+            ## loop used to scan a different range than the counter covers, and
+            ## reported a mismatch on a perfectly healthy volume. It is the one
+            ## place that must not trust the superblock about the shape of the
+            ## table it is auditing.
             var actual: Int = 0
             var off: Int = 0
-            while off < self.sb.segment_size:
+            while off < len(entry.valid_bitmap):
                 if entry.is_valid(off):
                     actual = actual + 1
                 off = off + 1

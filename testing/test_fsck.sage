@@ -141,22 +141,30 @@ fs.unmount()
 let with_real_sit: Any = fsck_module.Fsck(sb, fs.inode, fs.nat, fs.segment, nil, false)
 let real_sit_report = with_real_sit.run()
 var sit_issues: Int = 0
+var n_nat_mismatch: Int = 0
 for iss in real_sit_report.issues:
     if iss.code == fsck_module.ISSUE_SIT_COUNT or iss.code == fsck_module.ISSUE_NAT_SIT_MISMATCH:
         sit_issues = sit_issues + 1
+    if iss.code == fsck_module.ISSUE_NAT_SIT_MISMATCH:
+        n_nat_mismatch = n_nat_mismatch + 1
 ## The mount really does have a segment manager, which is the wiring that was
 ## missing.
 check("the mount really does have a segment manager", fs.segment != nil, true)
-## KNOWN: sit_issues is expected to be 0 here and is currently 1. Turning these
-## checks on for the first time surfaced a valid-count inconsistency on a healthy
-## volume -- the SIT bitmap and its valid_blocks counter disagree after ordinary
-## allocation. mark_valid and mark_invalid both maintain the counter, and
-## deserialize recomputes it from the bitmap, so the divergence is elsewhere in
-## the allocation path. It was invisible until now precisely because fsck was
-## never handed a SIT. Asserting 0 here would fail; asserting 1 would enshrine a
-## bug as expected. Left unchecked on purpose until the accounting is fixed.
-##   if sit_issues == 0:
-##       print("  note: SIT accounting is now consistent")
+## KNOWN: this is 1, from ISSUE_NAT_SIT_MISMATCH, and it should be 0. It appeared
+## only once fsck was actually handed a SIT, which is what these changes did.
+##
+## It is not the count check. sit_entries carry a fixed 512-block segment -- the
+## bitmap is 512 bits, serialize packs them into 64 bytes -- while segment_size in
+## the superblock is an independent field, and this volume sets it to 8. Both
+## checks used the superblock's value where the SIT's own geometry was meant, and
+## have been corrected to use the bitmap. The count check is clean as a result;
+## the mismatch check still fires, so the outstanding question is how a NAT
+## block_addr maps to a (segment, bit) pair -- the allocator chooses its bit with
+## SITEntry.find_free_block(), so the mapping is not necessarily blk % 512.
+##
+## Asserting 1 here would enshrine the bug as expected, and asserting 0 would
+## fail. Left unchecked on purpose until the mapping is traced.
+check("no SIT count issues on a healthy volume", sit_issues - n_nat_mismatch, 0)
 
 let real: Any = fsck_module.Fsck(sb, fs.inode, nil, nil, nil, false)
 let clean_report = real.run()
