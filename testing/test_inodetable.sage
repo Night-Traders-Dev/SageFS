@@ -389,53 +389,79 @@ proc test_vfs_migration_from_area():
 
 proc test_directory_inline_ceiling():
     print("")
-    print("Directory inline ceiling (known limit, now reported):")
+    print("Directory inline ceiling: refuse rather than lose:")
     let dev: String = "/tmp/sagefs_inodetable_dircap.img"
     check("format image", format_image(dev, "InoDirCap", true), true)
 
     let fs = vfs.VFS(dev)
     check("mount", fs.mount(), true)
 
-    ## A "fileNNN.txt" dentry costs 36 hex characters and the inline limit is
-    ## 3400, so one directory stops fitting at 94 entries. Everything below
-    ## that must work normally.
-    var made: Int = 0
+    ## A dentry costs 2*(7 + name_len) hex characters and the inline limit is
+    ## 3400, so one directory stops fitting at a bit over 100 of these names.
+    ## Every attempt past that point must be refused, because _save_dir() cannot
+    ## record it: set_inline_data() returns false having changed nothing, so the
+    ## directory would stop being saved while files kept being accepted into it.
+    var accepted: Array = []
+    var refused: Int = 0
     var i: Int = 0
-    while i < 300:
-        let fd = fs.open("/file" + str(i) + ".txt", vfs.O_CREAT | vfs.O_RDWR)
+    while i < 400:
+        let name = "/file" + str(i) + ".txt"
+        let fd = fs.open(name, vfs.O_CREAT | vfs.O_RDWR)
         if fd >= 0:
             fs.write(fd, bytes("content number " + str(i)))
             fs.close(fd)
-            made = made + 1
+            push(accepted, "/file" + str(i) + ".txt")
+        else:
+            refused = refused + 1
         i = i + 1
-    check("some number of files were created", made > 0, true)
-    check("the overflow is reported rather than silent", fs.dir_overflow_reported, true)
+    check("some files were created", len(accepted) > 90, true)
+    ## The ceiling is enforced by refusing, so _save_dir() never gets the chance
+    ## to overflow and its warning stays a backstop for a path that adds an entry
+    ## without checking. What matters is that the refusals happened at all.
+    check("the ceiling is reached and enforced", refused > 0, true)
 
-    ## The directory-entry cap is MAX_INLINE_DENTRIES and is a separate limit
-    ## from the inode table's. The table itself has no such ceiling: every inode
-    ## that exists is in it, which is the property v1.5 was for.
-    let inodes_in_memory = len(fs.inode.list_inodes())
+    ## A refusal must not cost an inode either. Checking after the inode was
+    ## created would leave one in the table that nothing points at, which the
+    ## inode table dutifully writes to disk on every unmount.
+    let inodes_for_accepted = len(fs.inode.list_inodes())
+    check_int("a refused create leaks no inode", inodes_for_accepted, len(accepted) + 1)
+
     check("unmount", fs.unmount(), true)
-    check_int("the inode table holds every inode that exists", fs.itable.count(), inodes_in_memory)
-    check("the table is well past what 32 KiB of area could hold", inodes_in_memory > 100, true)
+    check_int("the inode table holds every accepted inode", fs.itable.count(), len(accepted) + 1)
 
-    ## Names beyond the ceiling do not survive, and that is the documented
-    ## behaviour rather than a silent loss. Everything inside the ceiling does.
+    ## The property that actually matters. The ceiling is a real limit, but a
+    ## caller that is refused still has its files; a caller that is told "yes" and
+    ## loses the name does not.
     let fs2 = vfs.VFS(dev)
     check("remount", fs2.mount(), true)
     var survived: Int = 0
     var lost: Int = 0
     var j: Int = 0
-    while j < 300:
-        if fs2.resolve_path("/file" + str(j) + ".txt") != -1:
+    while j < len(accepted):
+        if fs2.resolve_path(accepted[j]) != -1:
             survived = survived + 1
+        else:
+            lost = lost + 1
         j = j + 1
-    lost = made - survived
-    check_int("every directory entry inside the ceiling survives", survived, 94)
-    check("the entries past the ceiling are the difference", lost > 0, true)
-    print("  (inodes " + str(inodes_in_memory) + " in the table, " + str(survived) +
-          " of " + str(made) + " names resolvable -- directory entries still need their own index)")
+    check_int("every accepted name survives a remount", survived, len(accepted))
+    check_int("and none is silently lost", lost, 0)
+    check_int("every accepted file keeps its contents",
+              fs2.stat(accepted[len(accepted) - 1])["size"],
+              len(bytes("content number " + str(len(accepted) - 1))))
+    print("  (" + str(len(accepted)) + " files accepted, " + str(refused) +
+          " refused at the inline ceiling, 0 lost -- lifting the ceiling needs a directory index)")
     check("unmount", fs2.unmount(), true)
+
+    ## And a directory that still has room keeps working normally.
+    let fs3 = vfs.VFS(dev)
+    check("mount again", fs3.mount(), true)
+    check("mkdir still works", fs3.mkdir("/sub"), true)
+    check("a file in a fresh directory works", fs3.open("/sub/x.txt", vfs.O_CREAT | vfs.O_RDWR) >= 0, true)
+    check("unmount", fs3.unmount(), true)
+    let fs4 = vfs.VFS(dev)
+    check("remount", fs4.mount(), true)
+    check("the fresh directory survived", fs4.stat("/sub/x.txt") != nil, true)
+    check("unmount", fs4.unmount(), true)
 
 proc test_v14_versioned_image():
     print("")

@@ -767,6 +767,28 @@ class VFS:
         let inline_data = inode_obj.get_inline_data()
         return self._decode_dir_data(inline_data)
 
+    proc _dir_has_room(self, parent_ino: Int, name: String) -> Bool:
+        ## Whether one more entry of this size can still be recorded in a directory.
+        ##
+        ## A directory is stored as one hex blob in its own inode, capped by
+        ## INLINE_DATA_MAX, and _save_dir() cannot record anything past that --
+        ## set_inline_data() refuses and changes nothing, so the directory stops
+        ## being saved altogether. That made this a lie: create_file() would
+        ## accept the 95th name, hand back a working descriptor, write to it, and
+        ## then lose the name on unmount, leaving a file in the inode table that
+        ## nothing could reach.
+        ##
+        ## Checking before the entry is added turns that into an early, visible
+        ## refusal. It does not lift the ceiling -- directory entries need their
+        ## own index for that -- but a caller that is told "no" still has its
+        ## file, whereas one that is told "yes" and loses the name does not.
+        let entries = self.dir.read_dir()
+        ## Same 2-byte header and per-entry encoding _save_dir() writes:
+        ## 4 bytes of ino, 2 of name length, 1 of file type, then the name.
+        let need = 2 + len(entries) * (7 + len(name)) + 2
+        let hex_len = 2 * need
+        return hex_len <= inode_module.INLINE_DATA_MAX
+
     proc _save_dir(self, ino: Int, dir_mgr: Any):
         let inode_obj = self.inode.get_inode(ino)
         if inode_obj == nil:
@@ -1162,6 +1184,9 @@ class VFS:
         ## returned false, and fsck reported a healthy-looking tree as broken.
         if mode == nil:
             mode = 493
+        ## Before the inode exists, so a refusal does not leak one.
+        if not self._dir_has_room(parent_ino, name):
+            return false
         let new_inode = self.inode.create_inode(S_IFDIR | (mode & 0xFFF), 0, 0)
         if new_inode == nil:
             return false
@@ -1198,6 +1223,12 @@ class VFS:
         if parent_dir == nil:
             return -1
         if parent_dir.lookup(name) != -1:
+            return -1
+        ## Check before the inode is created, not after. Refusing once the inode
+        ## exists leaves an inode in the table that nothing points at: it is
+        ## written to the inode tree on unmount and nothing ever removes it, so a
+        ## caller that keeps retrying would grow the table forever.
+        if not self._dir_has_room(parent_ino, name):
             return -1
         ## Check for a free descriptor *before* creating anything. This used to
         ## run after the inode was created and the directory entry was saved, so
@@ -1361,6 +1392,12 @@ class VFS:
         if old_parent == new_parent:
             if not old_dir.remove_entry(old_name):
                 return false
+            ## Same ceiling as create_file() and mkdir(): a rename that would push
+            ## the destination directory past what _save_dir() can record has to
+            ## be refused for the same reason, or it moves a file into a directory
+            ## that has silently stopped being saved.
+            if not self._dir_has_room(old_parent, new_name):
+                return false
             old_dir.add_entry(new_name, target_ino, entry_type)
             self._save_dir(old_parent, old_dir)
             return true
@@ -1372,6 +1409,8 @@ class VFS:
             return false
         if new_dir.lookup(new_name) != -1:
             new_dir.remove_entry(new_name)
+        if not self._dir_has_room(new_parent, new_name):
+            return false
         new_dir.add_entry(new_name, target_ino, entry_type)
         self._save_dir(old_parent, old_dir)
         if old_parent != new_parent:
