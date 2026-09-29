@@ -814,11 +814,23 @@ the image and write past the region.
 
 Not yet fixed. The design, worked out:
 
-- **The superblock does not need to grow.** Bytes 92–383 are unused — the last
-  field before them is `main_start_blk` at 84 and the next is `flags` at 384 —
-  so `inode_root_blk` (LE64 @ 92) and `inode_root_generation` (LE64 @ 100) fit in
-  existing padding. A v1.5 header is therefore additive, with no resize of
-  `SUPERBLOCK_HEADER_SIZE` and no change to the magic or the checksum placement.
+- **The superblock is full, and must be trimmed rather than resized.** Bytes
+  92–383 look like padding between `main_start_blk` at 84 and `flags` at 384, but
+  they are not: `uuid` occupies 92–127 and `label` occupies 128–383
+  (`MAX_LABEL_LEN` 256). The 480-byte header has no free bytes at all.
+  I previously reported 292 free bytes here by reading the offset gap between
+  numeric fields and missing the two fixed-width strings in it. That was wrong and
+  it changes the design.
+  The better fix is to shorten `MAX_LABEL_LEN` from 256 to 240, freeing bytes
+  368–383 for `inode_root_blk` (LE64 @ 368) and `inode_root_generation`
+  (LE64 @ 376). That keeps `SUPERBLOCK_HEADER_SIZE` at 480, keeps the checksum at
+  476, and leaves every existing field offset untouched — so the change really is
+  additive, and the only images that stop reading are ones written with a
+  >240-byte label. 240 characters is far more than a filesystem label needs
+  (ext4 allows 16, XFS 12, F2FS 16).
+  The alternative — growing the header to 496 and relocating the checksum from
+  476 — moves the checksum field and every offset after it, and buys nothing for
+  a 240-vs-256 character label.
 - **A separate B+ tree for the inode table, with its own root and generation.**
   This was left open as a judgement call and is now decided, against the
   alternative of sharing the extent tree's root: `docs/btree.md` states the CoW
