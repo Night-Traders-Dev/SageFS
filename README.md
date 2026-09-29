@@ -39,7 +39,7 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 28/28 files, 936 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
+**Tests: 28/28 files, 944 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
 previously not running at all; see [Known issues](#known-issues) for what is
 still broken.
 
@@ -997,10 +997,18 @@ descriptors, and were unreachable by name after a remount — with no error
 anywhere. `_save_dir()` now checks the return and reports, once per volume, that
 the directory is not being saved and that its files will not survive.
 
-Measured on 300 files in one directory: 257 inodes created, **all 257 in the inode
-table** (which is the property v1.5 was for, and past what 32 KiB of area could
-have held), 94 names resolvable after a remount. The gap is entirely the
-directory-entry limit.
+Better still, `create_file()`, `mkdir()` and `rename()` now **refuse** an entry
+that would not fit, checked before the inode is created. Reporting was only half a
+fix: the filesystem still accepted the name that would not fit, handed back a
+working descriptor, wrote to it, and lost the name at unmount. A caller told "no"
+still has its file; a caller told "yes" does not. The check runs before inode
+creation because checked after, a refused create left an inode in the table that
+the inode table wrote to disk on every unmount with nothing pointing at it.
+
+The property now guaranteed is the one that matters: **nothing the filesystem
+accepts is ever lost.** Measured, 400 create attempts in one directory give
+**100 accepted, 300 refused, 0 lost**, contents intact after a remount. The
+ceiling is real; it is no longer a lie.
 
 The fix is to give directory entries their own index — the same treatment the
 inode table just got, and independent for the same reason. That is the next piece
