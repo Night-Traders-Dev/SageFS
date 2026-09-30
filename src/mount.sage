@@ -53,26 +53,20 @@ proc main():
         return
 
     let dev: String = args[1]
-    let mountpoint: String = ""
-    if len(args) >= 3:
-        mountpoint = args[2]
+    if len(args) < 3:
+        print("Usage: mount.sage <image> <mountpoint>")
+        return
+    ## A mountpoint is not optional. Without one there is nothing to mount on,
+    ## and the old code fell through to an event loop reading a device with no
+    ## filesystem attached to it.
+    let mountpoint: String = args[2]
 
     let fs: vfs.VFS = fsimage.mount(dev)
     if fs == nil:
         print("SageFS: mount failed")
         return
 
-    print("SageFS: mounted " + dev + " — entering FUSE loop")
-
-    # Try FFI-based FUSE first, fall back to Python bridge
-    if mountpoint != "":
-        if fuse.fuse_init(mountpoint):
-            print("SageFS: native FUSE session initialized")
-            fuse.fuse_run(fs)
-        else:
-            print("SageFS: FFI unavailable, using Python FUSE bridge")
-            fuse.fuse_run(fs)
-    else:
-        fuse.fuse_run(fs)
+    print("SageFS: mounted " + dev + " — entering FUSE loop on " + mountpoint)
+    fuse.fuse_run(fs, mountpoint)
 
 main()

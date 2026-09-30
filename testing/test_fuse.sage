@@ -60,22 +60,64 @@ proc test_build_init_response() -> Bool:
     if bytes_len(resp) == 0:
         print "  FAIL test_build_init_response: empty"
         return false
-    # Response is 104 bytes total (header + fuse_init_out body)
-    if bytes_len(resp) != 104:
-        print "  FAIL test_build_init_response: len=" + str(bytes_len(resp)) + " expected=104"
+    ## fuse_init_out is 80 bytes, so 16 + 80 = 96. This asserted 104, which is
+    ## not a length the kernel accepts for INIT, and it only checked a length,
+    ## so it also passed with every field at the wrong offset.
+    if bytes_len(resp) != 96:
+        print "  FAIL test_build_init_response: len=" + str(bytes_len(resp)) + " expected=96"
+        return false
+    if fuse.decode_u32_le(resp, 0) != 96:
+        print "  FAIL test_build_init_response: length field"
+        return false
+    ## Negotiating major 7 is what the kernel checks the reply against.
+    if fuse.decode_u32_le(resp, 16) != 7:
+        print "  FAIL test_build_init_response: major at 16, got " + str(fuse.decode_u32_le(resp, 16))
+        return false
+    if fuse.decode_u32_le(resp, 20) != 26:
+        print "  FAIL test_build_init_response: minor at 20, got " + str(fuse.decode_u32_le(resp, 20))
+        return false
+    if fuse.decode_u32_le(resp, 24) != 131072:
+        print "  FAIL test_build_init_response: max_readahead at 24, got " + str(fuse.decode_u32_le(resp, 24))
+        return false
+    if fuse.decode_u32_le(resp, 36) != 65536:
+        print "  FAIL test_build_init_response: max_write at 36, got " + str(fuse.decode_u32_le(resp, 36))
         return false
     print "  PASS test_build_init_response"
     return true
 
 ## Test 3: build_lookup_response
 proc test_build_lookup_response() -> Bool:
-    let resp = fuse.build_lookup_response(2, 3)
-    if bytes_len(resp) == 0:
-        print "  FAIL test_build_lookup_response: empty"
-        return false
-    # 16-byte header + 96-byte fuse_entry_out = 112
-    if bytes_len(resp) != 112:
+    ## fuse_entry_out is 128 bytes, so 16 + 128 = 144. This asserted 112, which
+    ## is a size the kernel does not accept, and it only checked a length, so it
+    ## also passed when the reply carried no attributes at all.
+    let st: Dict = {"ino": 7, "size": 1234, "mode": 33188, "nlink": 1, "blocks": 8}
+    let resp = fuse.build_lookup_response(2, st)
+    if bytes_len(resp) != 144:
         print "  FAIL test_build_lookup_response: len=" + str(bytes_len(resp))
+        return false
+    # fuse_out_header: len(0) error(4) unique(8)
+    if fuse.decode_u32_le(resp, 0) != 144:
+        print "  FAIL test_build_lookup_response: header length field"
+        return false
+    if fuse.decode_i32_le(resp, 4) != 0:
+        print "  FAIL test_build_lookup_response: error field not zero"
+        return false
+    if fuse.decode_u64_le(resp, 8) != 2:
+        print "  FAIL test_build_lookup_response: unique not echoed"
+        return false
+    # fuse_entry_out: nodeid(16) generation(24) entry_valid(32) attr_valid(40)
+    if fuse.decode_u64_le(resp, 16) != 7:
+        print "  FAIL test_build_lookup_response: nodeid at 16, got " + str(fuse.decode_u64_le(resp, 16))
+        return false
+    # fuse_attr starts at 56: ino(56) size(64) blocks(72) ... mode(128) nlink(132)
+    if fuse.decode_u64_le(resp, 64) != 1234:
+        print "  FAIL test_build_lookup_response: attr size, got " + str(fuse.decode_u64_le(resp, 64))
+        return false
+    if fuse.decode_u32_le(resp, 128) != 33188:
+        print "  FAIL test_build_lookup_response: attr mode, got " + str(fuse.decode_u32_le(resp, 128))
+        return false
+    if fuse.decode_u32_le(resp, 132) != 1:
+        print "  FAIL test_build_lookup_response: attr nlink"
         return false
     print "  PASS test_build_lookup_response"
     return true
@@ -108,13 +150,34 @@ proc test_build_write_response() -> Bool:
 
 ## Test 6: build_statfs_response
 proc test_build_statfs_response() -> Bool:
-    let resp = fuse.build_statfs_response(5, nil)
-    if bytes_len(resp) == 0:
-        print "  FAIL test_build_statfs_response: empty"
-        return false
-    # 16-byte header + 96-byte fuse_statfs_out = 112
-    if bytes_len(resp) != 112:
+    ## fuse_statfs_out is 120 bytes, so 16 + 120 = 136.
+    let st: Dict = {"blocks": 100, "bfree": 40, "bavail": 35, "files": 10, "ffree": 9, "bsize": 4096}
+    let resp = fuse.build_statfs_response(5, st)
+    if bytes_len(resp) != 136:
         print "  FAIL test_build_statfs_response: len=" + str(bytes_len(resp))
+        return false
+    if fuse.decode_u32_le(resp, 0) != 136:
+        print "  FAIL test_build_statfs_response: header length"
+        return false
+    if fuse.decode_u64_le(resp, 8) != 5:
+        print "  FAIL test_build_statfs_response: unique not echoed"
+        return false
+    # fuse_statfs_out: blocks(16) bfree(24) bavail(32) files(40) ffree(48)
+    #                  bsize(56) namelen(64) frsize(72)
+    if fuse.decode_u64_le(resp, 16) != 100:
+        print "  FAIL test_build_statfs_response: blocks at 16, got " + str(fuse.decode_u64_le(resp, 16))
+        return false
+    if fuse.decode_u64_le(resp, 24) != 40:
+        print "  FAIL test_build_statfs_response: bfree"
+        return false
+    if fuse.decode_u64_le(resp, 48) != 9:
+        print "  FAIL test_build_statfs_response: ffree"
+        return false
+    # bsize is a u64. The old encoder wrote it with a u32 helper into the
+    # namelen slot, so a 4096-byte block size came back as 4096 with the rest
+    # of the field belonging to the next one.
+    if fuse.decode_u64_le(resp, 56) != 4096:
+        print "  FAIL test_build_statfs_response: bsize, got " + str(fuse.decode_u64_le(resp, 56))
         return false
     print "  PASS test_build_statfs_response"
     return true
@@ -212,12 +275,45 @@ proc test_on_op_mkdir_and_readdir():
         print "  FAIL test_on_op_mkdir_and_readdir: readdir empty"
         fs.unmount()
         return false
+    ## Entries are "ino name type" triples, so this also pins the inode number
+    ## and the DT_ type: a bare-name match would pass even if every entry were
+    ## reported as inode 1 / DT_DIR, which is what this used to allow.
     var found = false
+    var found_ino = 0
+    var found_type = 0
+    var saw_dot = false
+    var saw_dotdot = false
     for e in entries:
-        if e == "fusedir":
+        let sp = fuse.find_char(e, " ")
+        if sp < 0:
+            continue
+        let ino_s = e[0:sp]
+        let rest = e[sp + 1:len(e)]
+        let tp = fuse.find_char(rest, " ")
+        if tp < 0:
+            continue
+        let nm = rest[0:tp]
+        if nm == ".":
+            saw_dot = true
+        if nm == "..":
+            saw_dotdot = true
+        if nm == "fusedir":
             found = true
+            found_ino = fuse.str_to_int(ino_s)
+            found_type = fuse.str_to_int(rest[tp + 1:len(rest)])
     if not found:
         print "  FAIL test_on_op_mkdir_and_readdir: fusedir not in readdir"
+    if not saw_dot:
+        print "  FAIL test_on_op_mkdir_and_readdir: no . entry"
+    if not saw_dotdot:
+        print "  FAIL test_on_op_mkdir_and_readdir: no .. entry"
+    if found and found_ino <= fuse.FUSE_ROOT_ID:
+        print "  FAIL test_on_op_mkdir_and_readdir: fusedir ino=" + str(found_ino)
+    if found and found_type != 4:
+        print "  FAIL test_on_op_mkdir_and_readdir: fusedir type=" + str(found_type) + " want 4 (DT_DIR)"
+    if not found or not saw_dot or not saw_dotdot:
+        fs.unmount()
+        return false
         fs.unmount()
         return false
     print "  PASS test_on_op_mkdir_and_readdir"
@@ -378,9 +474,39 @@ proc test_dispatch_lookup_root():
     ## "dict comparison number" from the `result < 0` guard.
     args["parent"] = fuse.FUSE_ROOT_ID
     args["name"] = "/"
+    ## dispatch(LOOKUP) resolves the name and then stats it, so the result is a
+    ## stat dict. The kernel needs the attributes with the entry; returning a
+    ## bare nodeid is what made every file look like mode 0 to the kernel.
     let result = fuse.dispatch(fs, fuse.FUSE_LOOKUP, args)
-    if result == nil or result < 0:
-        print "  FAIL test_dispatch_lookup_root: result=" + str(result)
+    if result == nil:
+        print "  FAIL test_dispatch_lookup_root: nil result"
+        fs.unmount()
+        return false
+    if not dict_has(result, "ino"):
+        print "  FAIL test_dispatch_lookup_root: no ino"
+        fs.unmount()
+        return false
+    if not dict_has(result, "mode"):
+        print "  FAIL test_dispatch_lookup_root: no mode"
+        fs.unmount()
+        return false
+    let mode = result["mode"]
+    if (mode & 0xF000) != 0x4000:
+        print "  FAIL test_dispatch_lookup_root: root not a dir, mode=" + str(mode)
+        fs.unmount()
+        return false
+    ## And the bytes the kernel actually sees must be a well-formed entry.
+    let resp = fuse.build_lookup_response(1, result)
+    if bytes_len(resp) != 144:
+        print "  FAIL test_dispatch_lookup_root: entry len=" + str(bytes_len(resp))
+        fs.unmount()
+        return false
+    if fuse.decode_u64_le(resp, 16) != result["ino"]:
+        print "  FAIL test_dispatch_lookup_root: nodeid not encoded"
+        fs.unmount()
+        return false
+    if fuse.decode_u32_le(resp, 128) != mode:
+        print "  FAIL test_dispatch_lookup_root: mode not at attr+72"
         fs.unmount()
         return false
     print "  PASS test_dispatch_lookup_root"
@@ -402,11 +528,22 @@ proc test_readdir_entries():
         print "  FAIL test_readdir_entries: only " + str(len(entries)) + " entries"
         fs.unmount()
         return false
+    ## Entries are "ino name type" triples, so match the name field rather than
+    ## the whole string.
     var has_dot = false
     var has_dotdot = false
     for e in entries:
-        if e == ".": has_dot = true
-        if e == "..": has_dotdot = true
+        let sp = fuse.find_char(e, " ")
+        var nm = ""
+        if sp >= 0:
+            let rest = e[sp + 1:len(e)]
+            let tp = fuse.find_char(rest, " ")
+            if tp >= 0:
+                nm = rest[0:tp]
+            else:
+                nm = rest
+        if nm == ".": has_dot = true
+        if nm == "..": has_dotdot = true
     if not has_dot or not has_dotdot:
         print "  FAIL test_readdir_entries: missing ./.."
         fs.unmount()

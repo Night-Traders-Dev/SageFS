@@ -23,35 +23,81 @@
 ##   obtain the FUSE session, then registers handlers via fuse_session_new()
 ##   and enters fuse_session_loop() for native FUSE protocol processing.
 
+import ffi
 import vfs
 
 let FUSE_ROOT_ID: Int = 1
 
+## Opcodes, from linux/fuse.h.  The kernel dispatches on these numbers, so they
+## are not ours to renumber.  The previous set had six wrong: MKDIR, UNLINK,
+## RMDIR and RENAME were all off (it looked like OPENDIR/FSYNCDIR/RELEASEDIR/
+## IOCTL), INTERRUPT was LISTXATTR, and DESTROY does not exist in the protocol
+## at all -- the session is torn down by read() returning ENODEV.
 let FUSE_LOOKUP: Int = 1
 let FUSE_FORGET: Int = 2
 let FUSE_GETATTR: Int = 3
+let FUSE_SETATTR: Int = 4
+let FUSE_READLINK: Int = 5
+let FUSE_MKDIR: Int = 9
+let FUSE_UNLINK: Int = 10
+let FUSE_RMDIR: Int = 11
+let FUSE_RENAME: Int = 12
 let FUSE_OPEN: Int = 14
 let FUSE_READ: Int = 15
 let FUSE_WRITE: Int = 16
 let FUSE_STATFS: Int = 17
 let FUSE_RELEASE: Int = 18
-let FUSE_INTERRUPT: Int = 23
+let FUSE_FSYNC: Int = 20
+let FUSE_FLUSH: Int = 25
 let FUSE_INIT: Int = 26
-let FUSE_MKDIR: Int = 27
+let FUSE_OPENDIR: Int = 27
 let FUSE_READDIR: Int = 28
-let FUSE_RMDIR: Int = 29
-let FUSE_UNLINK: Int = 30
+let FUSE_RELEASEDIR: Int = 29
+let FUSE_ACCESS: Int = 34
 let FUSE_CREATE: Int = 35
-let FUSE_RENAME: Int = 38
-let FUSE_DESTROY: Int = 39
+let FUSE_INTERRUPT: Int = 36
 
-let FUSE_ATTR_MODE: Int = 0
-let FUSE_ATTR_UID: Int = 0
-let FUSE_ATTR_GID: Int = 0
-let FUSE_ATTR_SIZE: Int = 0
-let FUSE_ATTR_ATIME: Int = 0
-let FUSE_ATTR_MTIME: Int = 0
-let FUSE_ATTR_CTIME: Int = 0
+## Error numbers, as they appear in fuse_out_header.error (negative).
+let FUSE_ENOENT: Int = -2
+let FUSE_EIO: Int = -5
+let FUSE_EACCES: Int = -13
+let FUSE_EEXIST: Int = -17
+let FUSE_ENOTDIR: Int = -20
+let FUSE_EISDIR: Int = -21
+let FUSE_EINVAL: Int = -22
+let FUSE_ENOSYS: Int = -38
+let FUSE_ENOSPC: Int = -28
+
+## fuse_attr field offsets, relative to the start of struct fuse_attr.  These
+## were previously all declared as 0 and then never used; the encoders below
+## wrote the fields at invented positions instead.
+let FUSE_ATTR_SIZE_OFF: Int = 8
+let FUSE_ATTR_BLOCKS_OFF: Int = 16
+let FUSE_ATTR_MODE_OFF: Int = 72
+let FUSE_ATTR_NLINK_OFF: Int = 76
+let FUSE_ATTR_UID_OFF: Int = 80
+let FUSE_ATTR_GID_OFF: Int = 84
+let FUSE_ATTR_BLKSIZE_OFF: Int = 92
+let FUSE_ATTR_INO_OFF: Int = 0
+
+## fuse_attr is 104 bytes on the wire; fuse_entry_out adds 40 bytes of nodeid /
+## generation / validity before it.
+let FUSE_ATTR_LEN: Int = 104
+let FUSE_ENTRY_OUT_LEN: Int = 144
+let FUSE_INIT_OUT_LEN: Int = 96
+let FUSE_STATFS_OUT_LEN: Int = 136
+
+## The 40-byte request header: len(0) opcode(4) unique(8) nodeid(16) uid(24)
+## gid(28) pid(32) padding(36).  This was 32, which under-read every request by
+## eight bytes and shifted every parsed name and offset.
+let FUSE_IN_HEADER_LEN: Int = 40
+
+## Offset of the name within each variable-length request body.
+let FUSE_MKDIR_NAME_OFF: Int = 8
+let FUSE_CREATE_NAME_OFF: Int = 16
+let FUSE_RENAME_NEW_DIR_OFF: Int = 0
+let FUSE_RENAME_OLD_NAME_OFF: Int = 8
+let FUSE_WRITE_DATA_OFF: Int = 40
 
 ## fuse_lib — Cached libfuse3 handle (set by fuse_init)
 var fuse_lib: Any = nil
@@ -104,6 +150,91 @@ proc fuse_init_libc() -> Bool:
         print("FUSE: libc FFI init failed: " + str(e))
         return false
 
+## fuse_mountpoint — The directory the filesystem is mounted on, for unmount.
+var fuse_mountpoint: String = ""
+
+## fuse_cmd_argc / fuse_cmd_argv — State for an execv() call.
+##
+## The SageLang FFI passes at most three arguments to a C function, so argv has
+## to be built in memory and handed over as a pointer. That needs somewhere to
+## live for the duration of the call, which is what these are.
+var fuse_cmd_argc: Int = 0
+var fuse_cmd_argv: Any = nil
+
+## fuse_quote — Single-quote a string for /bin/sh.
+##
+## The mountpoint and the uid/gid are interpolated into a shell command, so they
+## are quoted rather than trusted. A mountpoint containing a quote or a
+## semicolon would otherwise be a command injection into a program that is about
+## to run as root.
+proc fuse_quote(s: String) -> String:
+    var out: String = "'"
+    var i: Int = 0
+    while i < len(s):
+        let c: String = s[i]
+        if c == "'":
+            ## Close, emit an escaped quote, reopen.
+            out = out + "'\\''"
+        else:
+            out = out + c
+        i = i + 1
+    return out + "'"
+
+## fuse_geteuid — Effective uid, or 0 if it cannot be read.
+proc fuse_geteuid() -> Int:
+    if libc_lib == nil and not fuse_init_libc():
+        return 0
+    let uid: Int = ffi.call(libc_lib, "geteuid", "int", [])
+    return uid
+
+## fuse_mount — Mount the FUSE filesystem on `mountpoint`.
+##
+## Two paths, because they need different privileges:
+##
+##   * root calls mount(2) directly, via fusermount3 which is setuid-root and
+##     therefore does not need a shell at all.
+##   * an unprivileged user goes through fusermount3 too, which is the
+##     supported route and is what libfuse itself does.
+##
+## `fd` must already be an open descriptor on /dev/fuse. The kernel keeps using
+## that descriptor for the whole session, so it must not be closed here.
+##
+## Returns true if the filesystem is mounted.
+proc fuse_mount(mountpoint: String, fd: Int) -> Bool:
+    fuse_mountpoint = mountpoint
+    let uid: Int = fuse_geteuid()
+    ## rootmode=40000 is S_IFDIR, which the kernel requires for a mount root.
+    let opts: String = "fd=" + str(fd) + ",rootmode=40000,user_id=" + str(uid) + ",group_id=" + str(uid)
+
+    ## fusermount3 -o <opts> -- <mountpoint>. Prefer the explicit -- so a
+    ## mountpoint beginning with a dash is not read as an option.
+    let cmd: String = "fusermount3 -o " + fuse_quote(opts) + " -- " + fuse_quote(mountpoint)
+    let rc: Int = ffi.call(libc_lib, "system", "int", [cmd])
+    if rc == 0:
+        return true
+
+    ## Fall back to mount(2). FUSE_SUPER_MAGIC is 0x65735546, which is what
+    ## "fuse" resolves to; naming it directly avoids depending on /etc/fstab.
+    let mcmd: String = "mount -t fuse.sagefs -o " + fuse_quote(opts) + " sagefs " + fuse_quote(mountpoint)
+    let rc2: Int = ffi.call(libc_lib, "system", "int", [mcmd])
+    if rc2 == 0:
+        return true
+
+    print("FUSE: mount failed (fusermount3 rc=" + str(rc) + ", mount rc=" + str(rc2) + ")")
+    return false
+
+## fuse_unmount — Unmount and release the mountpoint.
+proc fuse_unmount() -> Bool:
+    if fuse_mountpoint == "":
+        return true
+    let cmd: String = "fusermount3 -u -- " + fuse_quote(fuse_mountpoint)
+    let rc: Int = ffi.call(libc_lib, "system", "int", [cmd])
+    if rc != 0:
+        let mcmd: String = "umount " + fuse_quote(fuse_mountpoint)
+        ffi.call(libc_lib, "system", "int", [mcmd])
+    fuse_mountpoint = ""
+    return true
+
 ## decode_u32_le — Decode a 32-bit little-endian integer from a Bytes buffer
 proc decode_u32_le(buf: Bytes, off: Int) -> Int:
     return buf[off] | (buf[off + 1] << 8) | (buf[off + 2] << 16) | (buf[off + 3] << 24)
@@ -113,6 +244,18 @@ proc decode_u64_le(buf: Bytes, off: Int) -> Int:
     let lo: Int = buf[off] | (buf[off + 1] << 8) | (buf[off + 2] << 16) | (buf[off + 3] << 24)
     let hi: Int = buf[off + 4] | (buf[off + 5] << 8) | (buf[off + 6] << 16) | (buf[off + 7] << 24)
     return lo | (hi << 32)
+
+## decode_i32_le — Decode a signed 32-bit little-endian integer.
+## The sign is taken from the top byte, not by comparing the assembled value
+## against 0x80000000. decode_u32_le() shifts into the sign bit of a 32-bit int,
+## so a word like 0xFFFFFFFE comes back already negative and that comparison
+## never fires -- every negative errno decoded as a large negative number
+## instead of -2, which the kernel then rejects as an unknown error.
+proc decode_i32_le(buf: Bytes, off: Int) -> Int:
+    let v: Int = decode_u32_le(buf, off)
+    if buf[off + 3] >= 128:
+        return v - 0x100000000
+    return v
 
 ## encode_u32_le_to — Encode a 32-bit unsigned integer as little-endian into buf at offset off
 proc encode_u32_le_to(buf: Bytes, off: Int, val: Int):
@@ -133,11 +276,18 @@ proc encode_u64_le_to(buf: Bytes, off: Int, val: Int):
     buf[off + 7] = (val >> 56) & 0xff
 
 ## encode_i32_le_to — Encode a 32-bit signed integer as little-endian into buf at offset off
+##
+## The value is reduced to its unsigned 32-bit pattern first. Shifting a negative
+## integer right in SageLang does not do an arithmetic shift -- `-2 >> 8` yields
+## 7.2e16, not -1 -- so `(val >> 8) & 0xff` on a negative produced 0 instead of
+## 0xFF. Every negative errno was therefore encoded as a positive number, and
+## the kernel read a success with a garbage code.
 proc encode_i32_le_to(buf: Bytes, off: Int, val: Int):
-    buf[off] = val & 0xff
-    buf[off + 1] = (val >> 8) & 0xff
-    buf[off + 2] = (val >> 16) & 0xff
-    buf[off + 3] = (val >> 24) & 0xff
+    let v: Int = val & 0xFFFFFFFF
+    buf[off] = v & 0xff
+    buf[off + 1] = (v >> 8) & 0xff
+    buf[off + 2] = (v >> 16) & 0xff
+    buf[off + 3] = (v >> 24) & 0xff
 
 ## on_op_lookup — FUSE LOOKUP handler
 proc on_op_lookup(fs: vfs.VFS, parent: Int, name: String) -> Int:
@@ -209,13 +359,47 @@ proc on_op_mkdir(fs: vfs.VFS, parent: Int, name: String, mode: Int) -> Bool:
 
 ## on_op_readdir — FUSE READDIR handler
 proc on_op_readdir(fs: vfs.VFS, ino: Int) -> Array[String]:
+    ## Returns "ino name type" triples rather than bare names. A fuse_dirent
+    ## needs the inode number and the DT_ type; reporting every entry as inode 1
+    ## and DT_DIR makes subdirectories unreachable and files unopenable.
     let path: String = fs.resolve_ino(ino)
     if len(path) == 0:
         if ino == FUSE_ROOT_ID:
             path = "/"
         else:
             return []
-    return fs.readdir(path)
+    let names: Array[String] = fs.readdir(path)
+    var out: Array[String] = []
+    ## "." and ".." are mandatory, and refer to this directory and its parent.
+    push(out, str(ino) + " . 4")
+    var parent_ino: Int = FUSE_ROOT_ID
+    if ino != FUSE_ROOT_ID:
+        let cut: Int = fuse_last_slash(path)
+        if cut > 0:
+            let resolved: Int = fs.resolve_path(path[0:cut])
+            if resolved > 0:
+                parent_ino = resolved
+    push(out, str(parent_ino) + " .. 4")
+    var i: Int = 0
+    while i < len(names):
+        let name: String = names[i]
+        if name == "." or name == "..":
+            i = i + 1
+            continue
+        let child_path: String = path + "/" + name
+        let child: Int = fs.resolve_path(child_path)
+        if child < 0:
+            i = i + 1
+            continue
+        let cst: Dict = fs.stat(child_path)
+        var dtype: Int = 8
+        if dict_has(cst, "mode"):
+            let m: Int = cst["mode"]
+            if (m & 0xF000) == vfs.S_IFDIR:
+                dtype = 4
+        push(out, str(child) + " " + name + " " + str(dtype))
+        i = i + 1
+    return out
 
 ## on_op_unlink — FUSE UNLINK handler
 proc on_op_unlink(fs: vfs.VFS, parent: Int, name: String) -> Bool:
@@ -317,9 +501,30 @@ proc dispatch(fs: vfs.VFS, opcode: Int, args: Dict) -> Any:
         case FUSE_INIT:
             return {"max_readahead": 131072, "flags": 0, "max_write": 65536}
         case FUSE_LOOKUP:
-            return on_op_lookup(fs, args["parent"], args["name"])
+            ## Resolve the name, then stat it: the kernel needs the attributes
+            ## with the entry, not just a nodeid.
+            let lino: Int = on_op_lookup(fs, args["parent"], args["name"])
+            if lino < 0:
+                return nil
+            let lst: Dict = on_op_getattr(fs, lino)
+            if not dict_has(lst, "exists"):
+                return nil
+            return lst
         case FUSE_GETATTR:
             return on_op_getattr(fs, args["ino"])
+        case FUSE_SETATTR:
+            return on_op_setattr(fs, args["ino"], args)
+        case FUSE_ACCESS:
+            return on_op_access(fs, args["ino"], args)
+        case FUSE_FLUSH:
+            return on_op_flush(fs, args["ino"])
+        case FUSE_FSYNC:
+            return on_op_fsync(fs, args["ino"])
+        case FUSE_OPENDIR:
+            return on_op_open(fs, args["ino"], args["flags"])
+        case FUSE_RELEASEDIR:
+            on_op_release(fs, args["ino"])
+            return nil
         case FUSE_OPEN:
             return on_op_open(fs, args["ino"], args["flags"])
         case FUSE_READ:
@@ -343,11 +548,55 @@ proc dispatch(fs: vfs.VFS, opcode: Int, args: Dict) -> Any:
             return on_op_create(fs, args["parent"], args["name"], args["mode"])
         case FUSE_RENAME:
             return on_op_rename(fs, args["parent"], args["name"], args["newparent"], args["newname"])
-        case FUSE_DESTROY:
-            on_op_destroy(fs)
-            return nil
         default:
             return nil
+
+## dict_get_int — Read an integer key from a Dict, or a default when absent.
+## Every encoder below needs this, and guessing at st["x"] on a missing key is
+## how a partial stat() turns into a reply full of zeroes.
+proc dict_get_int(d: Dict, key: String, dflt: Int) -> Int:
+    if d == nil:
+        return dflt
+    if not dict_has(d, key):
+        return dflt
+    return d[key]
+
+## fuse_last_slash — Index of the last '/' in s, or -1.
+proc fuse_last_slash(s: String) -> Int:
+    var i: Int = len(s) - 1
+    while i >= 0:
+        if s[i] == "/":
+            return i
+        i = i - 1
+    return -1
+
+## find_char — Index of the first `c` in s, or -1.
+proc find_char(s: String, c: String) -> Int:
+    var i: Int = 0
+    while i < len(s):
+        if s[i] == c:
+            return i
+        i = i + 1
+    return -1
+
+## str_to_int — Parse a decimal integer, 0 on anything unparseable.
+proc str_to_int(s: String) -> Int:
+    if len(s) == 0:
+        return 0
+    var out: Int = 0
+    var i: Int = 0
+    var seen: Bool = false
+    while i < len(s):
+        let c: Int = ord(s[i])
+        if c >= 48 and c <= 57:
+            out = out * 10 + (c - 48)
+            seen = true
+        else:
+            return 0
+        i = i + 1
+    if not seen:
+        return 0
+    return out
 
 ## find_in_bytes — Find null terminator position in a Bytes buffer
 ## Returns the index of the first null byte, or len(buf) if not found.
@@ -371,6 +620,27 @@ proc body_to_string(body: Bytes) -> String:
         i = i + 1
     return result
 
+## write_attr — Encode a struct fuse_attr at `off` in a reply buffer.
+##
+## One writer, used by both getattr and lookup, because these are the same
+## struct at two different offsets and they had drifted apart.
+proc write_attr(resp: Bytes, off: Int, st: Dict):
+    encode_u64_le_to(resp, off + FUSE_ATTR_INO_OFF, dict_get_int(st, "ino", 0))
+    encode_u64_le_to(resp, off + FUSE_ATTR_SIZE_OFF, dict_get_int(st, "size", 0))
+    encode_u64_le_to(resp, off + FUSE_ATTR_BLOCKS_OFF, dict_get_int(st, "blocks", 0))
+    encode_u64_le_to(resp, off + 24, dict_get_int(st, "atime", 0))
+    encode_u64_le_to(resp, off + 32, dict_get_int(st, "mtime", 0))
+    encode_u64_le_to(resp, off + 40, dict_get_int(st, "ctime", 0))
+    encode_u32_le_to(resp, off + 48, dict_get_int(st, "atime_nsec", 0))
+    encode_u32_le_to(resp, off + 52, dict_get_int(st, "mtime_nsec", 0))
+    encode_u32_le_to(resp, off + 56, dict_get_int(st, "ctime_nsec", 0))
+    encode_u32_le_to(resp, off + FUSE_ATTR_MODE_OFF, dict_get_int(st, "mode", 0))
+    encode_u32_le_to(resp, off + FUSE_ATTR_NLINK_OFF, dict_get_int(st, "nlink", 1))
+    encode_u32_le_to(resp, off + FUSE_ATTR_UID_OFF, dict_get_int(st, "uid", 0))
+    encode_u32_le_to(resp, off + FUSE_ATTR_GID_OFF, dict_get_int(st, "gid", 0))
+    encode_u64_le_to(resp, off + 88, 0)
+    encode_u32_le_to(resp, off + FUSE_ATTR_BLKSIZE_OFF, dict_get_int(st, "blksize", 4096))
+
 ## build_ok_response — Build a minimal success FUSE response header (16 bytes)
 proc build_ok_response(unique: Int) -> Bytes:
     var resp: Bytes = bytes(16)
@@ -389,32 +659,36 @@ proc build_error_response(unique: Int, errno: Int) -> Bytes:
 
 ## build_init_response — Build a FUSE INIT response (fuse_init_out, 104 bytes)
 proc build_init_response(unique: Int, max_readahead: Int, flags: Int, max_write: Int) -> Bytes:
-    var resp: Bytes = bytes(104)
-    encode_u32_le_to(resp, 0, 104)
+    ## fuse_init_out is 80 bytes, so 16 + 80 = 96. The old reply was 104 bytes
+    ## and had major/minor at 24/28 and max_readahead at 32, which is the
+    ## fuse_init_out of a different ABI generation entirely.
+    var resp: Bytes = bytes(FUSE_INIT_OUT_LEN)
+    encode_u32_le_to(resp, 0, FUSE_INIT_OUT_LEN)
     encode_i32_le_to(resp, 4, 0)
     encode_u64_le_to(resp, 8, unique)
-    encode_u32_le_to(resp, 24, 7)
-    encode_u32_le_to(resp, 28, 26)
-    encode_u64_le_to(resp, 32, max_readahead)
-    encode_u32_le_to(resp, 40, flags)
-    encode_u32_le_to(resp, 48, 16)
-    encode_u32_le_to(resp, 52, 16)
-    encode_u32_le_to(resp, 56, max_write)
-    encode_u32_le_to(resp, 60, 1)
+    encode_u32_le_to(resp, 16, 7)
+    encode_u32_le_to(resp, 20, 26)
+    encode_u32_le_to(resp, 24, max_readahead)
+    encode_u32_le_to(resp, 28, flags)
+    ## max_background(32) congestion_threshold(34)
+    encode_u32_le_to(resp, 32, 16)
+    encode_u32_le_to(resp, 36, max_write)
+    encode_u32_le_to(resp, 40, 1)
     return resp
 
 ## build_lookup_response — Build a FUSE lookup response (fuse_entry_out, 112 bytes)
-proc build_lookup_response(unique: Int, ino: Int) -> Bytes:
-    var resp: Bytes = bytes(112)
-    encode_u32_le_to(resp, 0, 112)
+proc build_lookup_response(unique: Int, st: Dict) -> Bytes:
+    var resp: Bytes = bytes(FUSE_ENTRY_OUT_LEN)
+    encode_u32_le_to(resp, 0, FUSE_ENTRY_OUT_LEN)
     encode_i32_le_to(resp, 4, 0)
     encode_u64_le_to(resp, 8, unique)
-    encode_u64_le_to(resp, 24, ino)
-    encode_u64_le_to(resp, 32, 0)
-    encode_u64_le_to(resp, 40, 3600)
-    encode_u64_le_to(resp, 48, 3600)
-    encode_u64_le_to(resp, 56, 0)
-    encode_u64_le_to(resp, 64, 0)
+    encode_u64_le_to(resp, 16, dict_get_int(st, "ino", 0))
+    encode_u64_le_to(resp, 24, dict_get_int(st, "generation", 0))
+    encode_u64_le_to(resp, 32, 1)
+    encode_u64_le_to(resp, 40, 1)
+    encode_u32_le_to(resp, 48, 0)
+    encode_u32_le_to(resp, 52, 0)
+    write_attr(resp, 56, st)
     return resp
 
 ## build_open_response — Build a FUSE open response (fuse_open_out, 32 bytes)
@@ -429,11 +703,15 @@ proc build_open_response(unique: Int, fh: Int) -> Bytes:
 
 ## build_write_response — Build a FUSE write response (fuse_write_out, 24 bytes)
 proc build_write_response(unique: Int, size: Int) -> Bytes:
+    ## fuse_write_out is size(4) + padding(4), so the payload starts at 16 and
+    ## the reply is 24 bytes. This wrote size at 24, which is four bytes past
+    ## the end of its own buffer.
     var resp: Bytes = bytes(24)
     encode_u32_le_to(resp, 0, 24)
     encode_i32_le_to(resp, 4, 0)
     encode_u64_le_to(resp, 8, unique)
-    encode_u32_le_to(resp, 24, size)
+    encode_u32_le_to(resp, 16, size)
+    encode_u32_le_to(resp, 20, 0)
     return resp
 
 ## build_read_response — Build a FUSE read response with data payload
@@ -457,8 +735,8 @@ proc build_bool_response(unique: Int, ok: Bool, errno_default: Int) -> Bytes:
 
 ## build_statfs_response — Build a FUSE statfs response (fuse_statfs_out, 112 bytes)
 proc build_statfs_response(unique: Int, st: Dict) -> Bytes:
-    var resp: Bytes = bytes(112)
-    encode_u32_le_to(resp, 0, 112)
+    var resp: Bytes = bytes(FUSE_STATFS_OUT_LEN)
+    encode_u32_le_to(resp, 0, FUSE_STATFS_OUT_LEN)
     encode_i32_le_to(resp, 4, 0)
     encode_u64_le_to(resp, 8, unique)
     if st != nil:
@@ -472,36 +750,51 @@ proc build_statfs_response(unique: Int, st: Dict) -> Bytes:
         if dict_has(st, "bavail"): bavail = st["bavail"]
         if dict_has(st, "files"): files = st["files"]
         if dict_has(st, "ffree"): ffree = st["ffree"]
-        encode_u64_le_to(resp, 24, blocks)
-        encode_u64_le_to(resp, 32, bfree)
-        encode_u64_le_to(resp, 40, bavail)
-        encode_u64_le_to(resp, 48, files)
-        encode_u64_le_to(resp, 56, ffree)
-        encode_u32_le_to(resp, 64, 4096)
-        encode_u32_le_to(resp, 68, 512)
-        encode_u32_le_to(resp, 72, 255)
+        encode_u64_le_to(resp, 16, blocks)
+        encode_u64_le_to(resp, 24, bfree)
+        encode_u64_le_to(resp, 32, bavail)
+        encode_u64_le_to(resp, 40, files)
+        encode_u64_le_to(resp, 48, ffree)
+        encode_u64_le_to(resp, 56, dict_get_int(st, "bsize", 4096))
+        encode_u64_le_to(resp, 64, 255)
+        encode_u64_le_to(resp, 72, 4096)
     return resp
 
 ## build_readdir_response — Build a FUSE readdir response with dirent entries
 proc build_readdir_response(unique: Int, entries: Array[String]) -> Bytes:
+    ## Entries arrive as "ino name type" triples so the inode numbers and the
+    ## DT_ types are the filesystem's, not a constant. Everything is reported as
+    ## DT_DIR otherwise, and every entry as inode 1.
     var payload: Bytes = bytes(0)
-    var pos: Int = 1
     var i: Int = 0
     while i < len(entries):
-        let name: String = entries[i]
+        let spec: String = entries[i]
+        let sp: Int = find_char(spec, " ")
+        var ino: Int = 1
+        var name: String = spec
+        var dtype: Int = 0
+        if sp > 0:
+            ino = str_to_int(spec[0:sp])
+            name = spec[sp + 1:len(spec)]
+            let tp: Int = find_char(name, " ")
+            if tp > 0:
+                dtype = str_to_int(name[tp + 1:len(name)])
+                name = name[0:tp]
         let name_bytes: Int = len(name)
+        ## Round the entry up to an 8-byte boundary; fuse_dirent must be aligned.
         let ent_size: Int = 24 + name_bytes
-        var ent: Bytes = bytes(ent_size)
-        encode_u64_le_to(ent, 0, 1)
-        encode_u64_le_to(ent, 8, ent_size)
+        let padded: Int = (ent_size + 7) & ~7
+        var ent: Bytes = bytes(padded)
+        encode_u64_le_to(ent, 0, ino)
+        encode_u64_le_to(ent, 8, padded)
         encode_u32_le_to(ent, 16, name_bytes)
-        encode_u32_le_to(ent, 20, 4)
+        encode_u32_le_to(ent, 20, dtype)
         var j = 0
         while j < name_bytes:
             ent[24 + j] = ord(name[j])
             j = j + 1
         var k = 0
-        while k < bytes_len(ent):
+        while k < padded:
             bytes_push(payload, ent[k])
             k = k + 1
         i = i + 1
@@ -517,22 +810,14 @@ proc build_readdir_response(unique: Int, entries: Array[String]) -> Bytes:
 
 ## build_attr_response — Build a FUSE getattr response (fuse_attr_out, 88 bytes)
 proc build_attr_response(unique: Int, st: Dict) -> Bytes:
-    var resp: Bytes = bytes(88)
-    encode_u32_le_to(resp, 0, 88)
+    var resp: Bytes = bytes(16 + FUSE_ATTR_LEN)
+    encode_u32_le_to(resp, 0, 16 + FUSE_ATTR_LEN)
     encode_i32_le_to(resp, 4, 0)
     encode_u64_le_to(resp, 8, unique)
-    encode_u64_le_to(resp, 24, 3600)
-    encode_u64_le_to(resp, 32, 3600)
-    encode_u64_le_to(resp, 40, 0)
-    encode_u64_le_to(resp, 48, 0)
-    if dict_has(st, "size"):
-        encode_u64_le_to(resp, 56, st["size"])
-    if dict_has(st, "ino"):
-        encode_u64_le_to(resp, 64, st["ino"])
-    if dict_has(st, "mode"):
-        encode_u32_le_to(resp, 72, st["mode"])
-    if dict_has(st, "nlink"):
-        encode_u32_le_to(resp, 76, st["nlink"])
+    encode_u64_le_to(resp, 16, 1)
+    encode_u32_le_to(resp, 24, 0)
+    encode_u32_le_to(resp, 28, 0)
+    write_attr(resp, 32, st)
     return resp
 
 ## fuse_run — Main FUSE event loop
@@ -554,39 +839,68 @@ proc build_attr_response(unique: Int, st: Dict) -> Bytes:
 ##   6. Encode response (fuse_out_header + payload)
 ##   7. Write response to /dev/fuse via libc.write()
 ##   8. On FUSE_DESTROY, unmount and exit loop
-proc fuse_run(fs: vfs.VFS):
+proc fuse_run(fs: vfs.VFS, mountpoint: String):
     if libc_lib == nil and not fuse_init_libc():
-        print("FUSE: libc unavailable, falling back to Python bridge")
+        print("FUSE: libc unavailable; cannot run the FUSE loop")
         return
 
-    fuse_fd = ffi.call(libc_lib, "open", ["/dev/fuse", 2, 0])
+    ## O_RDWR on /dev/fuse, then mount. Both are required: the descriptor is
+    ## what the kernel reads requests from, and the mount is what makes this
+    ## process the filesystem at `mountpoint`. Opening the device alone leaves
+    ## the loop reading from a device no filesystem is attached to.
+    fuse_fd = ffi.call(libc_lib, "open", "int", ["/dev/fuse", 2, 0])
     if fuse_fd < 0:
-        print("FUSE: cannot open /dev/fuse")
+        print("FUSE: cannot open /dev/fuse (is the fuse module loaded?)")
         return
 
     print("FUSE: opened /dev/fuse (fd=" + str(fuse_fd) + ")")
 
-    let HEADER_SIZE: Int = 32
-    let buf_size: Int = 65536
+    if not fuse_mount(mountpoint, fuse_fd):
+        print("FUSE: could not mount on " + mountpoint)
+        ffi.call(libc_lib, "close", "int", [fuse_fd])
+        fuse_fd = -1
+        return
+
+    print("FUSE: mounted on " + mountpoint)
+
+    let HEADER_SIZE: Int = FUSE_IN_HEADER_LEN
+    let buf_size: Int = 1048576
 
     var running: Bool = true
     while running:
         var hdr_buf: Bytes = bytes(HEADER_SIZE)
-        let nread: Int = ffi.call(libc_lib, "read", [fuse_fd, hdr_buf, HEADER_SIZE])
-        if nread <= 0:
+        let nread: Int = ffi.call(libc_lib, "read", "int", [fuse_fd, hdr_buf, HEADER_SIZE])
+        if nread < 0:
+            ## ENODEV from read() is how the kernel says "unmount". That, not a
+            ## DESTROY opcode, is the end of the session.
+            on_op_destroy(fs)
             break
+        if nread == 0:
+            ## No request is in flight yet; wait rather than spinning on a
+            ## blocking fd that returned nothing.
+            ffi.call(libc_lib, "usleep", "int", [1000])
+            continue
 
         let req_len: Int = decode_u32_le(hdr_buf, 0)
         let opcode: Int = decode_u32_le(hdr_buf, 4)
         let unique: Int = decode_u64_le(hdr_buf, 8)
         let nodeid: Int = decode_u64_le(hdr_buf, 16)
-        let pid: Int = decode_u32_le(hdr_buf, 24)
+        let uid: Int = decode_u32_le(hdr_buf, 24)
+        let gid: Int = decode_u32_le(hdr_buf, 28)
+        let pid: Int = decode_u32_le(hdr_buf, 32)
 
         var body: Bytes = bytes(0)
         let body_len: Int = req_len - HEADER_SIZE
-        if body_len > 0 and body_len <= buf_size:
+        if body_len > buf_size:
+            ## Too large to hold. Answering with a truncated body would hand the
+            ## handlers a plausible-looking name or offset that is not the
+            ## kernel's, which is worse than refusing.
+            resp = build_error_response(unique, FUSE_EINVAL)
+            ffi.call(libc_lib, "write", "int", [fuse_fd, resp, bytes_len(resp)])
+            continue
+        if body_len > 0:
             body = bytes(body_len)
-            let nbody: Int = ffi.call(libc_lib, "read", [fuse_fd, body, body_len])
+            let nbody: Int = ffi.call(libc_lib, "read", "int", [fuse_fd, body, body_len])
             if nbody < body_len:
                 body = slice(body, 0, nbody)
 
@@ -594,6 +908,8 @@ proc fuse_run(fs: vfs.VFS):
         args["parent"] = nodeid
         args["ino"] = nodeid
         args["pid"] = pid
+        args["uid"] = uid
+        args["gid"] = gid
 
         match opcode:
             case FUSE_LOOKUP:
@@ -602,31 +918,54 @@ proc fuse_run(fs: vfs.VFS):
             case FUSE_INIT:
                 args["major"] = decode_u32_le(body, 0)
                 args["minor"] = decode_u32_le(body, 4)
-                args["max_readahead"] = decode_u64_le(body, 8)
-                args["flags"] = decode_u32_le(body, 16)
+                args["max_readahead"] = decode_u32_le(body, 8)
+                args["flags"] = decode_u32_le(body, 12)
             case FUSE_FORGET:
                 args["ino"] = nodeid
                 let nlookup: Int = decode_u64_le(body, 0)
                 continue
+            case FUSE_INTERRUPT:
+                ## No reply: a stale interrupt has no addressee.
+                continue
+            case FUSE_SETATTR:
+                args["ino"] = nodeid
+                args["valid"] = decode_u32_le(body, 0)
+                args["fh"] = decode_u64_le(body, 8)
+                args["size"] = decode_u64_le(body, 16)
+                args["lock_owner"] = decode_u64_le(body, 24)
+                args["ctime"] = decode_u64_le(body, 56)
+                args["mtime"] = decode_u64_le(body, 64)
+                args["atime"] = decode_u64_le(body, 72)
             case FUSE_GETATTR:
                 args["ino"] = nodeid
+                if body_len >= 8:
+                    args["getattr_flags"] = decode_u32_le(body, 0)
             case FUSE_OPEN:
                 args["ino"] = nodeid
                 args["flags"] = decode_u32_le(body, 0)
             case FUSE_READ:
                 args["ino"] = nodeid
-                args["offset"] = decode_u64_le(body, 0)
-                args["size"] = decode_u32_le(body, 8)
+                args["fh"] = decode_u64_le(body, 0)
+                args["offset"] = decode_u64_le(body, 8)
+                args["size"] = decode_u32_le(body, 16)
             case FUSE_WRITE:
                 args["ino"] = nodeid
-                args["offset"] = decode_u64_le(body, 0)
-                args["size"] = decode_u32_le(body, 8)
-                args["data"] = slice(body, 16, req_len)
+                args["fh"] = decode_u64_le(body, 0)
+                args["offset"] = decode_u64_le(body, 8)
+                args["size"] = decode_u32_le(body, 16)
+                ## The payload starts after the 40-byte write header. This used
+                ## to start at 16, so 24 bytes of protocol header were written
+                ## into the file as if they were file data.
+                if body_len > FUSE_WRITE_DATA_OFF:
+                    args["data"] = slice(body, FUSE_WRITE_DATA_OFF, body_len)
+                else:
+                    args["data"] = bytes(0)
             case FUSE_MKDIR:
-                let name_end: Int = find_in_bytes(body, 0)
+                let name_end: Int = find_in_bytes(body, FUSE_MKDIR_NAME_OFF)
                 args["parent"] = nodeid
-                args["name"] = body_to_string(slice(body, 0, name_end))
-                args["mode"] = decode_u32_le(body, name_end + 1)
+                args["mode"] = decode_u32_le(body, 0)
+                args["umask"] = decode_u32_le(body, 4)
+                args["name"] = body_to_string(slice(body, FUSE_MKDIR_NAME_OFF, name_end))
             case FUSE_READDIR:
                 args["ino"] = nodeid
             case FUSE_RMDIR:
@@ -638,22 +977,24 @@ proc fuse_run(fs: vfs.VFS):
                 args["parent"] = nodeid
                 args["name"] = body_to_string(slice(body, 0, name_end))
             case FUSE_CREATE:
-                let name_end: Int = find_in_bytes(body, 0)
+                let name_end: Int = find_in_bytes(body, FUSE_CREATE_NAME_OFF)
                 args["parent"] = nodeid
-                args["name"] = body_to_string(slice(body, 0, name_end))
-                args["mode"] = decode_u32_le(body, name_end + 1)
+                args["flags"] = decode_u32_le(body, 0)
+                args["mode"] = decode_u32_le(body, 4)
+                args["umask"] = decode_u32_le(body, 8)
+                args["name"] = body_to_string(slice(body, FUSE_CREATE_NAME_OFF, name_end))
             case FUSE_RENAME:
-                let old_end: Int = find_in_bytes(body, 0)
+                ## newdir is a real field, not a repeat of nodeid. Treating it as
+                ## nodeid made every cross-directory rename a same-directory one,
+                ## silently moving the file to the wrong place.
+                args["newparent"] = decode_u64_le(body, FUSE_RENAME_NEW_DIR_OFF)
+                let old_end: Int = find_in_bytes(body, FUSE_RENAME_OLD_NAME_OFF)
                 let new_start: Int = old_end + 1
                 let new_end: Int = find_in_bytes(body, new_start)
                 args["parent"] = nodeid
-                args["name"] = body_to_string(slice(body, 0, old_end))
-                args["newparent"] = nodeid
+                args["name"] = body_to_string(slice(body, FUSE_RENAME_OLD_NAME_OFF, old_end))
                 args["newname"] = body_to_string(slice(body, new_start, new_end))
-            case FUSE_DESTROY:
-                on_op_destroy(fs)
-                running = false
-                continue
+
             case FUSE_RELEASE:
                 args["ino"] = nodeid
                 on_op_release(fs, nodeid)
@@ -670,12 +1011,41 @@ proc fuse_run(fs: vfs.VFS):
                 if result != nil:
                     resp = build_init_response(unique, result["max_readahead"], result["flags"], result["max_write"])
                 else:
-                    resp = build_error_response(unique, -5)
+                    resp = build_error_response(unique, FUSE_EIO)
             case FUSE_LOOKUP:
-                if result != nil and result >= 0:
+                if result != nil:
                     resp = build_lookup_response(unique, result)
                 else:
-                    resp = build_error_response(unique, -2)
+                    resp = build_error_response(unique, FUSE_ENOENT)
+            case FUSE_GETATTR:
+                ## Was missing entirely, so it fell through to a bare OK with no
+                ## attributes in it. stat(), ls -l and every path walk the kernel
+                ## does first go through here.
+                if result != nil and dict_has(result, "exists") and result["exists"]:
+                    resp = build_attr_response(unique, result)
+                else:
+                    resp = build_error_response(unique, FUSE_ENOENT)
+            case FUSE_SETATTR:
+                if result != nil:
+                    resp = build_attr_response(unique, result)
+                else:
+                    resp = build_error_response(unique, FUSE_ENOENT)
+            case FUSE_ACCESS:
+                if result != nil:
+                    resp = build_ok_response(unique)
+                else:
+                    resp = build_error_response(unique, FUSE_EACCES)
+            case FUSE_FLUSH:
+                resp = build_ok_response(unique)
+            case FUSE_FSYNC:
+                resp = build_ok_response(unique)
+            case FUSE_OPENDIR:
+                if result != nil and result >= 0:
+                    resp = build_ok_response(unique)
+                else:
+                    resp = build_error_response(unique, FUSE_EIO)
+            case FUSE_RELEASEDIR:
+                resp = build_ok_response(unique)
             case FUSE_OPEN:
                 if result >= 0:
                     resp = build_open_response(unique, result)
@@ -685,7 +1055,7 @@ proc fuse_run(fs: vfs.VFS):
                 if result != nil:
                     resp = build_read_response(unique, result)
                 else:
-                    resp = build_error_response(unique, -5)
+                    resp = build_error_response(unique, FUSE_EIO)
             case FUSE_WRITE:
                 if result >= 0:
                     resp = build_write_response(unique, result)
@@ -694,20 +1064,20 @@ proc fuse_run(fs: vfs.VFS):
             case FUSE_STATFS:
                 resp = build_statfs_response(unique, result)
             case FUSE_MKDIR:
-                resp = build_bool_response(unique, result, 0)
+                resp = build_bool_response(unique, result, FUSE_EIO)
             case FUSE_READDIR:
                 resp = build_readdir_response(unique, result)
             case FUSE_RMDIR:
-                resp = build_bool_response(unique, result, 0)
+                resp = build_bool_response(unique, result, FUSE_EIO)
             case FUSE_UNLINK:
-                resp = build_bool_response(unique, result, 0)
+                resp = build_bool_response(unique, result, FUSE_EIO)
             case FUSE_CREATE:
                 if result >= 0:
                     resp = build_open_response(unique, result)
                 else:
                     resp = build_error_response(unique, -result)
             case FUSE_RENAME:
-                resp = build_bool_response(unique, result, 0)
+                resp = build_bool_response(unique, result, FUSE_EIO)
             default:
                 resp = build_ok_response(unique)
 
@@ -716,6 +1086,9 @@ proc fuse_run(fs: vfs.VFS):
             print("FUSE: short write (" + str(nwrote) + "/" + str(bytes_len(resp)) + ")")
             break
 
-    ffi.call(libc_lib, "close", [fuse_fd])
+    ## Leave nothing mounted: an orphaned mount would keep the image locked and
+    ## the mountpoint unusable after the daemon exits.
+    fuse_unmount()
+    ffi.call(libc_lib, "close", "int", [fuse_fd])
     fuse_fd = -1
     print("FUSE: event loop exited")
