@@ -220,6 +220,22 @@ proc decode_inode_entry(buf: Bytes, off: Int) -> Dict:
     return entry
 
 
+## bytes_to_hex -- lowercase hex, no separator. The inverse is inode.hex_to_bytes.
+##
+## Inline inode payloads are stored hex-encoded: a raw payload cannot represent a
+## zero byte, and README.txt is full of them (every line ends "\n"). Module-level
+## so mkfs can encode without importing vfs.
+proc bytes_to_hex(buf: Bytes) -> String:
+    var hex: String = ""
+    let hex_chars: String = "0123456789abcdef"
+    var i: Int = 0
+    while i < bytes_len(buf):
+        let b: Int = bytes_get(buf, i)
+        hex = hex + hex_chars[(b >> 4) & 0xF]
+        hex = hex + hex_chars[b & 0xF]
+        i = i + 1
+    return hex
+
 proc write_inode_entry_at(buf: Bytes, offset: Int, ino: Int, mode: Int, size: Int, name: String, data: String) -> Int:
     ## Write an inode entry at a specific offset in buf. Returns the number of
     ## bytes written (the entry size). Expands buf with zeros if offset is

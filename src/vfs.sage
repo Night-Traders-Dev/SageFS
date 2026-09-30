@@ -988,6 +988,45 @@ class VFS:
         f.pos = f.pos + to_read
         return result
 
+    ## Move an inline file's contents into data blocks.
+    ##
+    ## Called when a file stored inline outgrows INLINE_DATA_MAX. Bytes written
+    ## while inline live in the inode, not in any block, so falling straight
+    ## through to the block path would strand them and the file would read back
+    ## with a hole at the front.
+    ##
+    ## Deliberately does not open a transaction: the block path in write() opens
+    ## one immediately afterwards, and nesting them is not something I have
+    ## verified. A failure part-way leaves the blocks already written with their
+    ## extents recorded, so the file stays self-consistent and shorter than
+    ## intended rather than corrupt; the caller turns it into -1.
+    proc _migrate_inline_to_blocks(self, ino: Int, inode_obj) -> Bool:
+        let content: Bytes = self._hex_to_bytes(inode_obj.get_inline_data())
+        inode_obj.clear_inline_data()
+        self._invalidate_content(ino)
+        let total: Int = bytes_len(content)
+        if total <= 0:
+            return true
+        let bs = self._init_block_size()
+        var placed: Int = 0
+        while placed < total:
+            let chunk_len: Int = bs
+            if total - placed < bs:
+                chunk_len = total - placed
+            let alloc_info = self._alloc_block_addr("warm")
+            if alloc_info == nil:
+                return false
+            let phys_blk: Int = alloc_info["physical_blk"]
+            var chunk: Bytes = bytes(chunk_len)
+            var c: Int = 0
+            while c < chunk_len:
+                bytes_set(chunk, c, bytes_get(content, placed + c))
+                c = c + 1
+            self._write_block(phys_blk, chunk)
+            self.extent.insert_extent(ino, placed, phys_blk, chunk_len)
+            placed = placed + chunk_len
+        return true
+
     proc write(self, fd: Int, data: Bytes) -> Int:
         if fd < 0 or fd >= len(self.fds) or self.fds[fd] == nil:
             return -1
@@ -1016,24 +1055,48 @@ class VFS:
         var has_extents = false
         if self.extent != nil:
             has_extents = len(self.extent._collect_extents(f.ino)) > 0
-        if inode_obj.is_inline() or (not has_extents and new_size <= inode_module.INLINE_DATA_MAX):
-            let current = inode_obj.get_inline_data()
-            var new_data = ""
+        ## Inline payloads are hex, so N bytes occupy 2N characters and
+        ## INLINE_DATA_MAX bounds N at half that. Testing the byte count instead
+        ## meant set_inline_data() refused anything past 3400 bytes -- and its
+        ## return value was ignored here. Writing 3000 bytes and then 1000 more
+        ## reported 3000 and 1000 written, then read back 3000. A file that
+        ## outgrew the inline limit lost everything past it, silently.
+        let fits_inline: Bool = (new_size * 2) <= inode_module.INLINE_DATA_MAX
+        ## A file that already has extents stays block-mapped: its bytes live in
+        ## blocks, and routing it through the inline path would mean reassembling
+        ## the whole file only to re-encode it.
+        if fits_inline and not has_extents:
+            let current: Bytes = self._hex_to_bytes(inode_obj.get_inline_data())
+            ## Merge in bytes, not characters.
+            ##
+            ## This built the payload with `new_data + chr(byte)`. chr(0) is an
+            ## empty String because Strings are NUL-terminated, so a zero byte in
+            ## the written data vanished, and size was then set from the truncated
+            ## string. Writing [65,0,66,67] reported 4 written and read back 3.
+            var merged: Bytes = bytes(new_size)
             var i = 0
-            while i < f.pos and i < len(current):
-                new_data = new_data + current[i]
+            while i < f.pos and i < bytes_len(current):
+                bytes_set(merged, i, bytes_get(current, i))
                 i = i + 1
-            while i < f.pos:
-                new_data = new_data + chr(0)
-                i = i + 1
+            ## Bytes beyond the old end stay zero, which is what the chr(0) padding
+            ## loop was trying to express.
             i = 0
             while i < written:
-                new_data = new_data + chr(bytes_get(data, i))
+                bytes_set(merged, f.pos + i, bytes_get(data, i))
                 i = i + 1
-            inode_obj.set_inline_data(new_data)
-            inode_obj.size = len(new_data)
+            let hex_data: String = self._bytes_to_hex(merged)
+            if not inode_obj.set_inline_data(hex_data):
+                ## fits_inline makes this unreachable, but a silent refusal would
+                ## drop the write entirely, so fail loudly instead.
+                return -1
+            ## size is a byte count. set_inline_data() assigns len(data), which is
+            ## twice the truth for hex.
+            inode_obj.size = new_size
             self._invalidate_content(f.ino)
         else:
+            if inode_obj.is_inline() and not has_extents:
+                if not self._migrate_inline_to_blocks(f.ino, inode_obj):
+                    return -1
             ## Spread the write across as many blocks as it needs.
             ##
             ## This used to allocate a single block, hand the whole buffer to
@@ -1454,7 +1517,11 @@ class VFS:
         if inode_obj == nil:
             return bytes()
         if inode_obj.is_inline():
-            return bytes(inode_obj.get_inline_data())
+            ## Inline payloads are hex. Directories always were (_save_dir /
+            ## _decode_dir_data); regular files were not, and chr(0) is an empty
+            ## String, so a zero byte in a small file was dropped on the way in and
+            ## the file came back short. One persisted field, two conventions.
+            return self._hex_to_bytes(inode_obj.get_inline_data())
         if self.content_cache != nil and dict_has(self.content_cache, str(ino)):
             let hit = self.content_cache[str(ino)]
             if bytes_len(hit) > 0:

@@ -70,7 +70,12 @@ proc format_image(dev: String, label: String) -> Bool:
         bytes_push(buf, 0)
         pad = pad + 1
     imgio.write_inode_entry_at(buf, inode_area_offset, 2, S_IFREG | 0x1A4,
-                               len(readme), "README.txt", readme)
+                               len(readme), "README.txt",
+                                 # Inline payloads are hex; the read path
+                                 # hex-decodes. Passing the raw string stored
+                                 # NUL line endings verbatim, read back as
+                                 # garbage.
+                                 imgio.bytes_to_hex(bytes(readme)))
 
     ## Pad out to image_size so the reserved area is really present on disk.
     let min_image_size: Int = sb.inode_entry_start_blk * sb.block_size + sb.inode_entry_byte_size
