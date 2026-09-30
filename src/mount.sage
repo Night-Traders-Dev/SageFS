@@ -47,20 +47,34 @@ import fuse
 ## subsystem, replays the journal, detects and cleans orphan inodes,
 ## and returns a fully-wired vfs.VFS instance.
 proc main():
-    let args: Array[String] = sys.args()
-    if len(args) < 2:
-        print("Usage: mount.sage <image> [mountpoint]")
-        return
+    ## sys.args() begins with the launcher's own tokens, and the launcher eats
+    ## "-I" but leaves the include path behind as a bare argument. Indexing from
+    ## 1 therefore took "src" as the image, and the failure surfaced as a bad
+    ## superblock magic on a file that was never opened.
+    let all: Array[String] = sys.args()
+    let args: Array[String] = []
+    var i: Int = 0
+    while i < len(all):
+        let a: String = all[i]
+        if a == "src" or a == "." or a == "./src":
+            i = i + 1
+            continue
+        if len(a) >= 5 and a[len(a) - 5:len(a)] == ".sage":
+            i = i + 1
+            continue
+        push(args, a)
+        i = i + 1
 
-    let dev: String = args[1]
-    if len(args) < 3:
+    ## args is now exactly the program's own arguments, so they start at 0.
+    if len(args) < 2:
         print("Usage: mount.sage <image> <mountpoint>")
         return
+
+    let dev: String = args[0]
+    let mountpoint: String = args[1]
     ## A mountpoint is not optional. Without one there is nothing to mount on,
     ## and the old code fell through to an event loop reading a device with no
     ## filesystem attached to it.
-    let mountpoint: String = args[2]
-
     let fs: vfs.VFS = fsimage.mount(dev)
     if fs == nil:
         print("SageFS: mount failed")

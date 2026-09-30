@@ -213,14 +213,26 @@ proc fuse_mount(mountpoint: String, fd: Int) -> Bool:
     if rc == 0:
         return true
 
-    ## Fall back to mount(2). FUSE_SUPER_MAGIC is 0x65735546, which is what
-    ## "fuse" resolves to; naming it directly avoids depending on /etc/fstab.
-    let mcmd: String = "mount -t fuse.sagefs -o " + fuse_quote(opts) + " sagefs " + fuse_quote(mountpoint)
+    ## Fall back to mount(2). The filesystem type is "fuse"; naming a private
+    ## type like fuse.sagefs needs a /etc/filesystems entry and a matching
+    ## mount.fuse.sagefs helper, and without them mount(2) fails outright. The
+    ## source string is ignored by the FUSE driver but must still be a single
+    ## word, or the shell tries to execute it.
+    let mcmd: String = "mount -t fuse -o " + fuse_quote(opts) + " sagefs " + fuse_quote(mountpoint)
     let rc2: Int = ffi.call(libc_lib, "system", "int", [mcmd])
     if rc2 == 0:
         return true
 
-    print("FUSE: mount failed (fusermount3 rc=" + str(rc) + ", mount rc=" + str(rc2) + ")")
+    ## Report what actually happened. "mount failed" on its own is not
+    ## actionable, and the usual cause is not a bug here: fusermount3 refuses
+    ## the fd= handoff ("old style mounting not supported") on hosts where the
+    ## setuid helper is configured that way, and unprivileged mounting then needs
+    ## user namespaces.
+    print("FUSE: could not mount on " + mountpoint)
+    print("FUSE:   fusermount3 rc=" + str(rc) + ", mount(2) rc=" + str(rc2))
+    print("FUSE:   if fusermount3 reports 'old style mounting not supported', this host")
+    print("FUSE:   does not allow unprivileged FUSE; try running as root, or in a")
+    print("FUSE:   user namespace with fusermount3 available.")
     return false
 
 ## fuse_unmount — Unmount and release the mountpoint.

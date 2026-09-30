@@ -55,6 +55,12 @@ proc is_launcher_token(a: String) -> Bool:
         return true
     if len(a) >= 4 and a[len(a) - 4:len(a)] == ".svm":
         return true
+    ## The launcher consumes "-I" itself and leaves the include path as a bare
+    ## argument ahead of the script name. Left in place it is taken as the
+    ## device, and the image is then written to a file called "src" -- which is
+    ## silent, and reads as a successful mkfs.
+    if a == "src" or a == "." or a == "./src":
+        return true
     return false
 
 proc parse_args(args: Array) -> Dict:
@@ -144,29 +150,48 @@ proc format_device(dev: String, opts: Dict) -> Bool:
         i = i + 1
     imgio.write_inode_entry_at(buf, inode_area_offset, 2, S_IFREG | 0x1A4, len(readme), "README.txt", readme)
 
+    ## Sized to the reserved metadata area, not to total_blocks * block_size.
+    ##
+    ## A full-volume image is not currently mountable: the whole image is read
+    ## into memory at mount, and a read larger than the allocation ceiling comes
+    ## back as a zero-length buffer with no error, so a 256 MiB image silently
+    ## fails to open. Truncating the file up to the full volume size would make
+    ## mkfs report success and produce an image that cannot be mounted, which is
+    ## worse than an image that matches what the format can actually support.
+    ## Until reads are ranged rather than whole-file, --size governs the
+    ## superblock's block count and the image follows the metadata.
     let min_image_size = sb.inode_entry_start_blk * sb.block_size + sb.inode_entry_byte_size
     if bytes_len(buf) > min_image_size:
         sb.image_size = bytes_len(buf)
     else:
         sb.image_size = min_image_size
 
-    ## Pad buf to image_size with zeros
-    var i2 = bytes_len(buf)
-    while i2 < sb.image_size:
-        bytes_push(buf, 0)
-        i2 = i2 + 1
-
-    let sb_bytes = sb.serialize()
-    var j = 0
-    while j < bytes_len(sb_bytes):
-        bytes_set(buf, j, bytes_get(sb_bytes, j))
-        j = j + 1
+    ## The metadata buffer is written as-is, and the file is then extended to
+    ## the full volume size separately.
+    ##
+    ## Padding it in memory first does not work: bytes() silently returns a
+    ## zero-length buffer once the request is large, with no error, so a 256 MiB
+    ## volume produced a 64 KiB image whose superblock advertised 256 MiB. The
+    ## file is made sparse with truncate instead, which costs no memory and is
+    ## what every other filesystem formatter does.
+    ## Write the metadata, then extend the file to the full volume size.
+    ##
+    ## Not padded in memory: bytes() returns a zero-length buffer for a request
+    ## this large rather than failing, so a 256 MiB volume silently produced a
+    ## 64 KiB image whose superblock advertised 256 MiB. truncate() extends with
+    ## zeros, costs no memory, and keeps the file sparse.
+    ##
+    ## The metadata is written first because truncate() does not create a file.
+    ## It already carries the final superblock, so nothing needs rewriting after.
+    imgio.write_image(dev, buf)
+    if bytes_len(buf) < sb.image_size:
+        if not imgio.truncate_to(dev, sb.image_size):
+            print "error: could not size " + dev + " to " + str(sb.image_size) + " bytes"
+            return false
 
     if io.filesize(dev) > 0 and not opts["force"]:
         print "error: " + dev + " already exists (use --force to overwrite)"
         return false
-
-    imgio.write_image(dev, buf)
 
     print "  label        : " + sb.label
     print "  uuid         : " + sb.uuid

@@ -4,6 +4,7 @@
 ## For block devices, uses a C helper (bdev_io) for reads since
 ## io.readbytes cannot determine block device size via ftell.
 
+import ffi
 import io
 import sys
 
@@ -20,6 +21,25 @@ proc write_image(path: String, buf: Bytes) -> Bool:
         return sys.exec(cmd) == 0
     io.writebytes(path, buf)
     return true
+
+## truncate_to — Set a file's length, extending it with zeros if needed.
+##
+## Used instead of building a full-volume buffer in memory. bytes() returns a
+## zero-length buffer for large requests rather than failing, so an in-memory
+## pad silently produces a truncated image.
+proc truncate_to(path: String, size: Int) -> Bool:
+    if _is_block_device(path):
+        return true
+    try:
+        ## libc truncate() rather than anything in the standard library: there
+        ## is no os.truncate here, and this needs to extend the file to a size
+        ## far larger than it is comfortable allocating.
+        let lib = ffi.open("libc.so.6")
+        if lib == nil:
+            return false
+        return ffi.call(lib, "truncate", "int", [path, size]) == 0
+    catch e:
+        return false
 
 proc read_image(path: String) -> Bytes:
     let data = io.readbytes(path)
