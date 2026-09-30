@@ -91,10 +91,22 @@ proc read(fd: Int, buf: Bytes) -> Int:
         let n: Int = got
         if n > cap:
             n = cap
-        var i: Int = 0
-        while i < n:
-            buf[i] = mem_read(ptr, i, "byte")
-            i = i + 1
+        ## One memcpy instead of one mem_read per byte.
+        ##
+        ## This used to loop `while i < n: buf[i] = mem_read(ptr, i, "byte")`, which
+        ## made reading a large image cost one interpreted FFI round trip per byte.
+        ## A 10,690,560-byte read is 10.7 million of them: that trips the
+        ## interpreter's 10,000,000-iteration loop cap outright, so any volume over
+        ## about 10 MB could not be read at all, and below the cap it still ran at
+        ## roughly 1.4 MB/s.
+        ##
+        ## mem_copy_from_ptr returns nil rather than copying when n exceeds either
+        ## the pointer's owned size or the Bytes, so this cannot overrun the buffer;
+        ## the cap above already clamps n to cap, which is the binding limit.
+        let copied: Int = mem_copy_from_ptr(ptr, buf, n)
+        if copied == nil:
+            mem_free(ptr)
+            return -1
     mem_free(ptr)
     return got
 
@@ -106,10 +118,13 @@ proc write(fd: Int, buf: Bytes) -> Int:
     let ptr = mem_alloc(n)
     if ptr == nil:
         return 0
-    var i: Int = 0
-    while i < n:
-        mem_write(ptr, i, "byte", buf[i])
-        i = i + 1
+    ## One memcpy instead of one mem_write per byte -- same 10M-iteration-cap
+    ## problem as read() above. Returns nil rather than copying if n exceeds
+    ## either bound.
+    let copied: Int = mem_copy_to_ptr(ptr, buf, n)
+    if copied == nil:
+        mem_free(ptr)
+        return -1
     let put: Int = ffi.call(libc_handle, "write", "int", [fd, ptr, n])
     mem_free(ptr)
     return put
