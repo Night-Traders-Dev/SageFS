@@ -149,10 +149,10 @@ proc format_device(dev: String, opts: Dict) -> Bool:
         bytes_push(buf, 0)
         i = i + 1
     ## Inline payloads are hex. This passed the raw string, so every NUL-terminated
-      ## line ending in the README was stored as a literal NUL -- and the read path
-      ## hex-decodes, so it came back as garbage instead of text.
-      let readme_hex: String = imgio.bytes_to_hex(bytes(readme))
-      imgio.write_inode_entry_at(buf, inode_area_offset, 2, S_IFREG | 0x1A4, len(readme), "README.txt", readme_hex)
+    ## line ending in the README was stored as a literal NUL -- and the read path
+    ## hex-decodes, so it came back as garbage instead of text.
+    let readme_hex: String = imgio.bytes_to_hex(bytes(readme))
+    imgio.write_inode_entry_at(buf, inode_area_offset, 2, S_IFREG | 0x1A4, len(readme), "README.txt", readme_hex)
 
     ## Sized to the reserved metadata area, not to total_blocks * block_size.
     ##
