@@ -24,6 +24,7 @@
 ##   and enters fuse_session_loop() for native FUSE protocol processing.
 
 import ffi
+import fileio
 import vfs
 
 let FUSE_ROOT_ID: Int = 1
@@ -149,6 +150,84 @@ proc fuse_init_libc() -> Bool:
     catch e:
         print("FUSE: libc FFI init failed: " + str(e))
         return false
+
+## fuse_ensure_libc — Make sure the libc handle exists.
+## The FFI helpers below need it, and fuse_run() normally sets it up first.
+proc fuse_ensure_libc() -> Bool:
+    if libc_lib == nil:
+        return fuse_init_libc()
+    return true
+
+## fuse_open_rd — open(2) for reading.
+proc fuse_open_rd(path: String) -> Int:
+    if not fuse_ensure_libc():
+        return -1
+    return ffi.call(libc_lib, "open", "int", [path, 0])
+
+## fuse_open_rw — open(2) for writing, creating and truncating.
+proc fuse_open_rw(path: String) -> Int:
+    if not fuse_ensure_libc():
+        return -1
+    ## O_WRONLY|O_CREAT|O_TRUNC = 1|64|512 = 577, mode 0644 = 420.
+    return ffi.call(libc_lib, "open", "int", [path, 577, 420])
+
+## fuse_close_fd — close(2).
+proc fuse_close_fd(fd: Int):
+    if fd >= 0:
+        ffi.call(libc_lib, "close", "int", [fd])
+
+## fuse_lseek — lseek(2).
+proc fuse_lseek(fd: Int, off: Int) -> Int:
+    if not fuse_ensure_libc():
+        return -1
+    return ffi.call(libc_lib, "lseek", "int", [fd, off, 0])
+
+## fuse_read_fd — read(2) from fd into buf, via an FFI pointer.
+##
+## The FFI takes a mem_alloc pointer for a buffer argument, not a Bytes. Passing
+## a Bytes matches no specialisation, so the call returns nil and the byte count
+## is lost -- which is what every read() in the event loop used to do, on a host
+## where the mount itself worked.
+proc fuse_read_fd(fd: Int, buf: Bytes, n: Int) -> Int:
+    if n <= 0:
+        return 0
+    let want: Int = n
+    if want > bytes_len(buf):
+        want = bytes_len(buf)
+    let ptr = mem_alloc(want)
+    if ptr == nil:
+        return 0
+    let got: Int = ffi.call(libc_lib, "read", "int", [fd, ptr, want])
+    var copied: Int = 0
+    if got > 0:
+        if got > bytes_len(buf):
+            copied = bytes_len(buf)
+        else:
+            copied = got
+        var i: Int = 0
+        while i < copied:
+            buf[i] = mem_read(ptr, i, "byte")
+            i = i + 1
+    mem_free(ptr)
+    if got < 0:
+        return got
+    return copied
+
+## fuse_write_fd — write(2) buf to fd, via an FFI pointer. Same shape as above.
+proc fuse_write_fd(fd: Int, buf: Bytes) -> Int:
+    let n: Int = bytes_len(buf)
+    if n == 0:
+        return 0
+    let ptr = mem_alloc(n)
+    if ptr == nil:
+        return 0
+    var i: Int = 0
+    while i < n:
+        mem_write(ptr, i, "byte", buf[i])
+        i = i + 1
+    let put: Int = ffi.call(libc_lib, "write", "int", [fd, ptr, n])
+    mem_free(ptr)
+    return put
 
 ## fuse_mountpoint — The directory the filesystem is mounted on, for unmount.
 var fuse_mountpoint: String = ""
@@ -881,7 +960,7 @@ proc fuse_run(fs: vfs.VFS, mountpoint: String):
     var running: Bool = true
     while running:
         var hdr_buf: Bytes = bytes(HEADER_SIZE)
-        let nread: Int = ffi.call(libc_lib, "read", "int", [fuse_fd, hdr_buf, HEADER_SIZE])
+        let nread: Int = fuse_read_fd(fuse_fd, hdr_buf, HEADER_SIZE)
         if nread < 0:
             ## ENODEV from read() is how the kernel says "unmount". That, not a
             ## DESTROY opcode, is the end of the session.
@@ -908,13 +987,13 @@ proc fuse_run(fs: vfs.VFS, mountpoint: String):
             ## handlers a plausible-looking name or offset that is not the
             ## kernel's, which is worse than refusing.
             resp = build_error_response(unique, FUSE_EINVAL)
-            ffi.call(libc_lib, "write", "int", [fuse_fd, resp, bytes_len(resp)])
+            fuse_write_fd(fuse_fd, resp)
             continue
         if body_len > 0:
             body = bytes(body_len)
-            let nbody: Int = ffi.call(libc_lib, "read", "int", [fuse_fd, body, body_len])
+            let nbody: Int = fuse_read_fd(fuse_fd, body, body_len)
             if nbody < body_len:
-                body = slice(body, 0, nbody)
+                body = fileio.slice_bytes(body, 0, nbody)
 
         var args: Dict = {}
         args["parent"] = nodeid
@@ -926,7 +1005,7 @@ proc fuse_run(fs: vfs.VFS, mountpoint: String):
         match opcode:
             case FUSE_LOOKUP:
                 let name_end: Int = find_in_bytes(body, 0)
-                args["name"] = body_to_string(slice(body, 0, name_end))
+                args["name"] = body_to_string(fileio.slice_bytes(body, 0, name_end))
             case FUSE_INIT:
                 args["major"] = decode_u32_le(body, 0)
                 args["minor"] = decode_u32_le(body, 4)
@@ -969,7 +1048,7 @@ proc fuse_run(fs: vfs.VFS, mountpoint: String):
                 ## to start at 16, so 24 bytes of protocol header were written
                 ## into the file as if they were file data.
                 if body_len > FUSE_WRITE_DATA_OFF:
-                    args["data"] = slice(body, FUSE_WRITE_DATA_OFF, body_len)
+                    args["data"] = fileio.slice_bytes(body, FUSE_WRITE_DATA_OFF, body_len)
                 else:
                     args["data"] = bytes(0)
             case FUSE_MKDIR:
@@ -977,24 +1056,24 @@ proc fuse_run(fs: vfs.VFS, mountpoint: String):
                 args["parent"] = nodeid
                 args["mode"] = decode_u32_le(body, 0)
                 args["umask"] = decode_u32_le(body, 4)
-                args["name"] = body_to_string(slice(body, FUSE_MKDIR_NAME_OFF, name_end))
+                args["name"] = body_to_string(fileio.slice_bytes(body, FUSE_MKDIR_NAME_OFF, name_end))
             case FUSE_READDIR:
                 args["ino"] = nodeid
             case FUSE_RMDIR:
                 let name_end: Int = find_in_bytes(body, 0)
                 args["parent"] = nodeid
-                args["name"] = body_to_string(slice(body, 0, name_end))
+                args["name"] = body_to_string(fileio.slice_bytes(body, 0, name_end))
             case FUSE_UNLINK:
                 let name_end: Int = find_in_bytes(body, 0)
                 args["parent"] = nodeid
-                args["name"] = body_to_string(slice(body, 0, name_end))
+                args["name"] = body_to_string(fileio.slice_bytes(body, 0, name_end))
             case FUSE_CREATE:
                 let name_end: Int = find_in_bytes(body, FUSE_CREATE_NAME_OFF)
                 args["parent"] = nodeid
                 args["flags"] = decode_u32_le(body, 0)
                 args["mode"] = decode_u32_le(body, 4)
                 args["umask"] = decode_u32_le(body, 8)
-                args["name"] = body_to_string(slice(body, FUSE_CREATE_NAME_OFF, name_end))
+                args["name"] = body_to_string(fileio.slice_bytes(body, FUSE_CREATE_NAME_OFF, name_end))
             case FUSE_RENAME:
                 ## newdir is a real field, not a repeat of nodeid. Treating it as
                 ## nodeid made every cross-directory rename a same-directory one,
@@ -1004,8 +1083,8 @@ proc fuse_run(fs: vfs.VFS, mountpoint: String):
                 let new_start: Int = old_end + 1
                 let new_end: Int = find_in_bytes(body, new_start)
                 args["parent"] = nodeid
-                args["name"] = body_to_string(slice(body, FUSE_RENAME_OLD_NAME_OFF, old_end))
-                args["newname"] = body_to_string(slice(body, new_start, new_end))
+                args["name"] = body_to_string(fileio.slice_bytes(body, FUSE_RENAME_OLD_NAME_OFF, old_end))
+                args["newname"] = body_to_string(fileio.slice_bytes(body, new_start, new_end))
 
             case FUSE_RELEASE:
                 args["ino"] = nodeid

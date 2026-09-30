@@ -216,7 +216,11 @@ proc verify_image(dev: String) -> Bool:
             needed = superblock.SUPERBLOCK_HEADER_SIZE
         buf = imgio.read_image_exact(dev, needed)
     else:
-        buf = imgio.read_image(dev)
+        ## Read only the superblock. The whole image is not needed to check the
+        ## magic and the layout, and reading it back means allocating the entire
+        ## volume -- which returns nil past 100 MiB, leaving verify reporting
+        ## "image too small: 0 bytes" about an image that is exactly right.
+        buf = imgio.read_image_range(dev, 0, superblock.SUPERBLOCK_HEADER_SIZE)
     if bytes_len(buf) < 428:
         print "verify: FAIL (image too small: " + str(bytes_len(buf)) + " bytes)"
         return false

@@ -205,7 +205,31 @@ class VFS:
                 needed = superblock.SUPERBLOCK_HEADER_SIZE
             raw = imgio.read_image_exact(self.image_path, needed)
         else:
-            raw = imgio.read_image(self.image_path)
+            ## Read the metadata area, not the whole image.
+            ##
+            ## A whole-file read returns nil past 100 MiB, with no error, so a
+            ## full-volume image opens as length 0 and the mount reports a bad
+            ## superblock magic on a perfectly good volume. The metadata area is
+            ## the superblock plus the reserved inode-entry region, which is what
+            ## everything below indexes into -- so read that much, as a range, and
+            ## leave the data blocks alone.
+            ##
+            ## The superblock has to be parsed off the header before the size is
+            ## known, so that read comes first and the rest is sized from it.
+            let header = imgio.read_image_range(self.image_path, 0, superblock.SUPERBLOCK_HEADER_SIZE)
+            if bytes_len(header) < 428:
+                print("VFS: image too small (" + str(bytes_len(header)) + " bytes)")
+                return false
+            self.sb = superblock.deserialize_superblock(header)
+            if self.sb.magic != superblock.SAGEFS_MAGIC:
+                print("VFS: bad magic 0x" + str(self.sb.magic) + " (expected 0x" + str(superblock.SAGEFS_MAGIC) + ")")
+                return false
+            let rneeded = self.sb.inode_entry_start_blk * self.sb.block_size + self.sb.inode_entry_byte_size
+            if self.sb.image_size > rneeded:
+                rneeded = self.sb.image_size
+            if rneeded < superblock.SUPERBLOCK_HEADER_SIZE:
+                rneeded = superblock.SUPERBLOCK_HEADER_SIZE
+            raw = imgio.read_image_range(self.image_path, 0, rneeded)
 
         if bytes_len(raw) < 428:
             print("VFS: image too small (" + str(bytes_len(raw)) + " bytes)")

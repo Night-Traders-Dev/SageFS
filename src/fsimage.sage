@@ -46,7 +46,14 @@ proc mount(dev: String) -> vfs.VFS:
     ## VFS.init() aborts partway, fs.journal is left nil, the journal replay
     ## raises on it, and the mount ends with a single inode. The hand-built
     ## graph bought nothing that VFS.mount() does not already do correctly.
-    let raw: Bytes = imgio.read_image(dev)
+    ## Read the metadata area as a range rather than the whole image.
+    ##
+    ## io.readbytes() refuses a whole-file read over 100 MiB and returns nil
+    ## with no error, so a full-volume image read this way comes back as length
+    ## 0 and the mount reports "image too small" about an image that is exactly
+    ## the right size. The header comes first, because the size of the rest of
+    ## the metadata depends on it.
+    let raw: Bytes = imgio.read_image_range(dev, 0, superblock.SUPERBLOCK_HEADER_SIZE)
     if bytes_len(raw) < 428:
         print("SageFS: image too small (" + str(bytes_len(raw)) + " bytes)")
         return nil
@@ -54,6 +61,13 @@ proc mount(dev: String) -> vfs.VFS:
     if sb.magic != superblock.SAGEFS_MAGIC:
         print("SageFS: bad magic 0x" + str(sb.magic) + " (expected 0x" + str(superblock.SAGEFS_MAGIC) + ")")
         return nil
+    ## Superblock plus the reserved inode-entry area: everything the mount
+    ## indexes into. The data blocks stay on disk.
+    let meta_end: Int = sb.inode_entry_start_blk * sb.block_size + sb.inode_entry_byte_size
+    if meta_end > sb.image_size:
+        meta_end = sb.image_size
+    if meta_end > bytes_len(raw):
+        raw = imgio.read_image_range(dev, 0, meta_end)
 
     let fs: Any = vfs.VFS(dev)
     if not fs.mount():

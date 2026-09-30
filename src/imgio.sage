@@ -5,6 +5,7 @@
 ## io.readbytes cannot determine block device size via ftell.
 
 import ffi
+import fileio
 import io
 import sys
 
@@ -53,6 +54,25 @@ proc read_image(path: String) -> Bytes:
     if ok != 0:
         return data
     return io.readbytes(tmp)
+
+## read_image_range — Read `size` bytes from `offset`, without loading the file.
+##
+## io.readbytes() caps a whole-file read at 100 MiB and returns nil past that,
+## with no error, so anything larger reads back as length 0: a full-size image
+## opens as an empty one and the mount reports a corrupt superblock. A bounded
+## range works at any size.
+proc read_image_range(path: String, offset: Int, size: Int) -> Bytes:
+    if size <= 0:
+        return bytes()
+    let got: Bytes = fileio.read_at(path, offset, size)
+    if bytes_len(got) > 0:
+        return got
+    ## Block devices are not seekable through the FFI path, so fall back to the
+    ## whole-image read and take the range out of it.
+    let whole: Bytes = read_image(path)
+    if bytes_len(whole) <= offset:
+        return bytes()
+    return fileio.slice_bytes(whole, offset, offset + size)
 
 proc read_image_exact(path: String, size: Int) -> Bytes:
     let data = io.readbytes(path)
