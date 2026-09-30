@@ -64,6 +64,24 @@ let CRC32C_POLY: Int = 0x82F63B78
 ## Module-global lookup table, lazily initialised on first use.
 var CRC32C_TABLE: Array[Int] = []
 
+## FNV-1a over a string, byte for byte the same function the interpreter's hash()
+## builtin uses (core/src/c/interpreter.c fnv1a_str). SageFS used to call hash()
+## directly in three places; the interpreter and bytecode backend have it and
+## neither compiled backend does, so sage-c rejected those files and sagemake
+## silently fell back to the SageVM backend. Checksums computed here therefore
+## match ones computed by the interpreter, which is what keeps a formatted image
+## verifiable across toolchains.
+proc fnv1a_str(s: String) -> Int:
+    var h: Int = 2166136261
+    var i: Int = 0
+    while i < len(s):
+        ## ord() of a one-character slice gives that character's code point,
+        ## which is the byte FNV-1a expects for the ASCII text these hashes cover.
+        h = (h ^ ord(slice(s, i, i + 1))) * 16777619
+        h = h & 0xFFFFFFFF
+        i = i + 1
+    return h
+
 proc crc32c_build_table():
     ## Populate the 256-entry CRC32C lookup table (reflected algorithm).
     ## Idempotent — a second call is a no-op once the table is built.

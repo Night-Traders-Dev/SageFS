@@ -26,6 +26,7 @@
 ## ============================================================================
 
 import sys
+import checksum
 
 # ---------------------------------------------------------------------------
 # Constants — Magic, version, sizes
@@ -195,15 +196,22 @@ proc read_bytes_string(buf: Bytes, offset: Int, max_len: Int) -> String:
 proc generate_uuid() -> String:
     ## Generate a simple UUID-like identifier.
     ##
-    ## Uses the current clock value combined with hash() to produce a
+    ## Uses the current clock value combined with FNV-1a to produce a
     ## 128-bit hex string formatted as 8-4-4-4-12.  This is *not*
     ## cryptographically random but is sufficient for volume identification
     ## during development.  A production implementation would read from
     ## /dev/urandom or use a CSPRNG.
-    let seed1: Int = hash(str(sys.clock()))
-    let seed2: Int = hash(str(sys.clock()) + "_sagefs_uuid")
-    let seed3: Int = hash(str(seed1) + str(seed2))
-    let seed4: Int = hash(str(seed3) + "_tail")
+    ## This was calling the `hash` builtin, which the interpreter and bytecode
+    ## backend provide and neither compiled backend does. `sage-c --emit-c
+    ## src/mkfs.sage` failed on it with "unknown name 'hash' in compiled code",
+    ## which is why sagemake kept falling back to the SageVM backend: the shipped
+    ## binary and the backend the test suite exercises were different toolchains.
+    ## FNV-1a, the same function the interpreter's hash() uses, so a UUID
+    ## generated here matches one generated under the interpreter.
+    let seed1: Int = checksum.fnv1a_str(str(sys.clock()))
+    let seed2: Int = checksum.fnv1a_str(str(sys.clock()) + "_sagefs_uuid")
+    let seed3: Int = checksum.fnv1a_str(str(seed1) + str(seed2))
+    let seed4: Int = checksum.fnv1a_str(str(seed3) + "_tail")
 
     ## Convert each seed to 8 hex chars and concatenate to get 32 hex digits
     let hex_chars: String = "0123456789abcdef"
@@ -514,7 +522,7 @@ class SageFSSuperblock:
         payload = payload + str(self.inode_entry_start_blk)
         payload = payload + str(self.inode_entry_byte_size)
 
-        let raw: Int = hash(payload)
+        let raw: Int = checksum.fnv1a_str(payload)
         ## Ensure non-negative 32-bit value
         if raw < 0:
             return (-raw) & 0xFFFFFFFF
@@ -936,7 +944,7 @@ class SageFSCheckpoint:
             payload = payload + str(self.cur_data_blkoff[i])
             i = i + 1
 
-        let raw: Int = hash(payload)
+        let raw: Int = checksum.fnv1a_str(payload)
         if raw < 0:
             return (-raw) & 0xFFFFFFFF
         return raw & 0xFFFFFFFF

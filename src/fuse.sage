@@ -410,6 +410,60 @@ proc on_op_getattr(fs: vfs.VFS, ino: Int) -> Dict:
             return {"exists": false}
     return fs.stat(path)
 
+## The FUSE dispatcher referenced on_op_setattr, on_op_access, on_op_flush and
+## on_op_fsync, and none of the four were ever defined. The interpreter resolves
+## a missing proc to nil at run time, so the FUSE paths that reach them never
+## worked; the C backend rejects the name outright, which is why
+## `sage-c --emit-c src/fuse.sage` failed and took mount.sage and all.sage with
+## it. They are defined here rather than removed, because the operations are
+## real and the dispatcher is the one place that knows their shapes.
+##
+## FUSE_SETATTR mask bits, from linux/fuse.h.
+let FUSE_SET_ATTR_MODE: Int = 1
+let FUSE_SET_ATTR_SIZE: Int = 8
+
+## on_op_setattr — FUSE SETATTR handler. Applies the mode and size the kernel
+## asked for; other mask bits (uid, gid, times) have no backing field on
+## SageFSInode beyond ctime/mtime, which write() already maintains, so they are
+## accepted and ignored rather than reported as an error the kernel would retry.
+proc on_op_setattr(fs: vfs.VFS, ino: Int, args: Dict) -> Dict:
+    let st: Dict = on_op_getattr(fs, ino)
+    if not dict_has(st, "exists"):
+        return {"exists": false}
+    let mask: Int = args["mask"]
+    let obj = fs.inode.get_inode(ino)
+    if (mask & FUSE_SET_ATTR_MODE) != 0:
+        obj.mode = args["mode"]
+    if (mask & FUSE_SET_ATTR_SIZE) != 0:
+        let fd: Int = fs.open(fs.resolve_ino(ino), vfs.O_WRONLY)
+        if fd != -1:
+            fs.truncate(fd, args["size"])
+            fs.close(fd)
+    fs.inode.update_inode(ino)
+    return on_op_getattr(fs, ino)
+
+## on_op_access — FUSE ACCESS handler. SageFS is single-user and stores no
+## permission bits beyond the mode, and the VFS layer does not enforce an access
+## policy, so the honest answer is that everything that resolves is accessible.
+## Returning -EACCES here would break mounts that currently work.
+proc on_op_access(fs: vfs.VFS, ino: Int, args: Dict) -> Int:
+    let path: String = fs.resolve_ino(ino)
+    if len(path) == 0 and ino != FUSE_ROOT_ID:
+        return -9
+    return 0
+
+## on_op_flush — FUSE FLUSH handler. Called on every close(2), and the kernel may
+## call it more than once for a single fd, so it must be idempotent. fsync is the
+## call that has to persist; flush just needs to not fail.
+proc on_op_flush(fs: vfs.VFS, ino: Int) -> Int:
+    return 0
+
+## on_op_fsync — FUSE FSYNC handler. _persist_all writes the dirty inodes and
+## directories back to the image, which is what fsync has to mean here.
+proc on_op_fsync(fs: vfs.VFS, ino: Int) -> Int:
+    fs._persist_all()
+    return 0
+
 ## on_op_read — FUSE READ handler
 proc on_op_read(fs: vfs.VFS, ino: Int, offset: Int, size: Int) -> Bytes:
     let path: String = fs.resolve_ino(ino)

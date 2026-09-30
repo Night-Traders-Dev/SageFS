@@ -4,6 +4,8 @@
 ## Filename encryption via AES-256-CTS (simulated).
 ## Key derivation from passphrase.
 
+import checksum
+
 let ENCRYPT_NONE: Int = 0
 let ENCRYPT_AES256_XTS: Int = 1
 
@@ -19,7 +21,7 @@ class EncryptionLayer:
         let key_id = str(ino) + ":" + salt
         if not dict_has(self.inode_keys, key_id):
             var key = ""
-            let base = hash(self.master_key + "_" + str(ino) + "_" + salt)
+            let base = checksum.fnv1a_str(self.master_key + "_" + str(ino) + "_" + salt)
             for i in range(32):
                 let nibble = (base >> (i * 4)) & 0x0F
                 key = key + str(nibble)
