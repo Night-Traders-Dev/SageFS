@@ -124,7 +124,7 @@ proc fuse_init(mountpoint: String) -> Bool:
         if fuse_lib == nil:
             print("FUSE: libfuse3.so.4 not found")
             return false
-        fuse_session = ffi.call(fuse_lib, "fuse_session_new", [mountpoint])
+        fuse_session = ffi.call(fuse_lib, "fuse_session_new", "int", [mountpoint])
         if fuse_session == nil:
             print("FUSE: fuse_session_new failed")
             return false
@@ -1102,6 +1102,13 @@ proc fuse_run(fs: vfs.VFS, mountpoint: String, fd: Int = -1):
             case FUSE_OPEN:
                 args["ino"] = nodeid
                 args["flags"] = decode_u32_le(body, 0)
+            case FUSE_OPENDIR:
+                ## Same fuse_open_in body as FUSE_OPEN. Without this, args
+                ## ["flags"] stayed nil and dispatch handed on_op_open a nil
+                ## flags, so OPENDIR never produced a reply and a directory
+                ## listing hung the caller waiting on it.
+                args["ino"] = nodeid
+                args["flags"] = decode_u32_le(body, 0)
             case FUSE_READ:
                 args["ino"] = nodeid
                 args["fh"] = decode_u64_le(body, 0)
@@ -1240,7 +1247,11 @@ proc fuse_run(fs: vfs.VFS, mountpoint: String, fd: Int = -1):
             default:
                 resp = build_ok_response(unique)
 
-        let nwrote: Int = ffi.call(libc_lib, "write", [fuse_fd, resp, bytes_len(resp)])
+        ## Through fuse_write_fd, not write(2) directly. ffi.call needs a live
+        ## pointer, and resp is a Bytes value: the C backend rejects it as
+        ## "unsupported argument types for int return", which made the loop
+        ## answer nothing at all. fuse_write_fd allocates and copies.
+        let nwrote: Int = fuse_write_fd(fuse_fd, resp)
         if nwrote < bytes_len(resp):
             print("FUSE: short write (" + str(nwrote) + "/" + str(bytes_len(resp)) + ")")
             break
