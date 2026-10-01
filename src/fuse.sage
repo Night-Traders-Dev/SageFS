@@ -838,12 +838,18 @@ proc build_lookup_response(unique: Int, st: Dict) -> Bytes:
 
 ## build_open_response — Build a FUSE open response (fuse_open_out, 32 bytes)
 proc build_open_response(unique: Int, fh: Int) -> Bytes:
+    ## fuse_open_out is fh(8) + open_flags(4) + padding(4) on top of the
+    ## 16-byte out_header, so fh belongs at 16 and the whole reply is 32 bytes.
+    ## This wrote fh at 24, which put it in open_flags and left the real fh slot
+    ## zeroed: every file the kernel opened came back with fh 0, so the first
+    ## process to READ or WRITE a file used descriptor 0 regardless of what it
+    ## had opened.
     var resp: Bytes = bytes(32)
     encode_u32_le_to(resp, 0, 32)
     encode_i32_le_to(resp, 4, 0)
     encode_u64_le_to(resp, 8, unique)
-    encode_u64_le_to(resp, 24, fh)
-    encode_u32_le_to(resp, 28, 0)
+    encode_u64_le_to(resp, 16, fh)
+    encode_u32_le_to(resp, 24, 0)
     return resp
 
 ## build_write_response — Build a FUSE write response (fuse_write_out, 24 bytes)
@@ -1026,6 +1032,10 @@ proc fuse_run(fs: vfs.VFS, mountpoint: String, fd: Int = -1):
     let buf_size: Int = 1048576
 
     var running: Bool = true
+    ## Consecutive zero-length reads tolerated before the channel is considered
+    ## finished. See the nread == 0 branch below.
+    let FUSE_EMPTY_READ_LIMIT: Int = 50
+    var empty_reads: Int = 0
     while running:
         var hdr_buf: Bytes = bytes(HEADER_SIZE)
         let nread: Int = fuse_read_fd(fuse_fd, hdr_buf, HEADER_SIZE)
@@ -1035,10 +1045,23 @@ proc fuse_run(fs: vfs.VFS, mountpoint: String, fd: Int = -1):
             on_op_destroy(fs)
             break
         if nread == 0:
-            ## No request is in flight yet; wait rather than spinning on a
-            ## blocking fd that returned nothing.
+            ## A short grace period for a spurious zero, then treat it as the end
+            ## of the channel.
+            ##
+            ## The previous behaviour was to usleep(1ms) and loop forever. On
+            ## /dev/fuse that is unreachable, because the kernel blocks in read
+            ## and reports an unmount as ENODEV. On any other descriptor read
+            ## returning 0 is end-of-stream, so the loop never exited: it burned
+            ## a millisecond of CPU per iteration indefinitely, and because it
+            ## inherits stdout it also held the parent's output pipe open, so
+            ## anything reading that pipe waited forever. Bounding it here is
+            ## what lets testing/test_fuse_loop.sage close its end cleanly.
+            empty_reads = empty_reads + 1
+            if empty_reads > FUSE_EMPTY_READ_LIMIT:
+                break
             ffi.call(libc_lib, "usleep", "int", [1000])
             continue
+        empty_reads = 0
 
         let req_len: Int = decode_u32_le(hdr_buf, 0)
         let opcode: Int = decode_u32_le(hdr_buf, 4)
@@ -1101,14 +1124,21 @@ proc fuse_run(fs: vfs.VFS, mountpoint: String, fd: Int = -1):
                     args["getattr_flags"] = decode_u32_le(body, 0)
             case FUSE_OPEN:
                 args["ino"] = nodeid
-                args["flags"] = decode_u32_le(body, 0)
+                ## fuse_open_in is 8 bytes: flags@0, open_flags@4. Guarded like
+                ## the GETATTR case above: decode_u32_le reads four separate
+                ## bytes, so an undersized body raises four separate
+                ## out-of-bounds errors and leaves flags as nil, which
+                ## on_op_open then treats as an unusable descriptor.
+                if body_len >= 4:
+                    args["flags"] = decode_u32_le(body, 0)
             case FUSE_OPENDIR:
-                ## Same fuse_open_in body as FUSE_OPEN. Without this, args
-                ## ["flags"] stayed nil and dispatch handed on_op_open a nil
-                ## flags, so OPENDIR never produced a reply and a directory
-                ## listing hung the caller waiting on it.
+                ## Same fuse_open_in body as FUSE_OPEN, and the same guard.
+                ## Without the parse, args["flags"] stayed nil and dispatch
+                ## handed on_op_open a nil flags, so OPENDIR never produced a
+                ## reply and a directory listing hung the caller.
                 args["ino"] = nodeid
-                args["flags"] = decode_u32_le(body, 0)
+                if body_len >= 4:
+                    args["flags"] = decode_u32_le(body, 0)
             case FUSE_READ:
                 args["ino"] = nodeid
                 args["fh"] = decode_u64_le(body, 0)

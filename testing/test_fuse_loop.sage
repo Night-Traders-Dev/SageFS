@@ -119,6 +119,15 @@ proc send_frame(fd: Int, req: Bytes):
     ffi.call(lib, "write", "int", [fd, ptr, bytes_len(req)])
     mem_free(ptr)
 
+## fuse_open_in: flags@0 (O_*), open_flags@4. The kernel always sends both;
+## sending an empty body is not a case the protocol allows, and the loop is now
+## guarded against it anyway.
+proc open_in(flags: Int) -> Bytes:
+    let b: Bytes = bytes(8)
+    put_u32(b, 0, flags)
+    put_u32(b, 4, 0)
+    return b
+
 proc strbytes(s: String) -> Bytes:
     let b: Bytes = bytes(0)
     let src: Bytes = bytes(s)
@@ -193,7 +202,9 @@ proc main(args: Array):
         ## memory image and must not run the parent's cleanup or assertions.
         let cfs: Any = vfs.VFS(img)
         if cfs.mount():
+            note("  [child] entering fuse_run\n")
             fuse.fuse_run(cfs, "", cli)
+            note("  [child] left fuse_run\n")
             cfs.unmount()
         ffi.call(lib, "_exit", "int", [0])
 
@@ -243,7 +254,7 @@ proc main(args: Array):
     let file_ino: Int = fuse.decode_u64_le(r3[2], 0)
     check("LOOKUP returned an inode id", file_ino > 1, true)
 
-    send_frame(kfd, make_req(fuse.FUSE_OPENDIR, 5, 1, bytes(0)))
+    send_frame(kfd, make_req(fuse.FUSE_OPENDIR, 5, 1, open_in(0)))
     let r5 = recv_reply(kfd)
     check("OPENDIR no error", r5[0], 0)
     let rdir: Bytes = bytes(24)
@@ -256,9 +267,17 @@ proc main(args: Array):
     check("READDIR returned entries", bytes_len(r6[2]) > 0, true)
 
     ## --- OPEN then READ the file back ---
-    send_frame(kfd, make_req(fuse.FUSE_OPEN, 7, file_ino, bytes(0)))
+    send_frame(kfd, make_req(fuse.FUSE_OPEN, 7, file_ino, open_in(0)))
     let r7 = recv_reply(kfd)
     check("OPEN unique echoed", r7[1], 7)
+    ## fuse_open_out puts fh at 16. It used to be written at 24, which left the
+    ## kernel reading fh 0 for every file opened.
+    check("OPEN reply body is fuse_open_out", bytes_len(r7[2]), 16)
+    if bytes_len(r7[2]) == 16:
+        ## Within the body fh is at 0 and open_flags at 8. It used to be written
+        ## at 24, which left the kernel reading fh 0 for every file opened.
+        check("OPEN carries a handle", fuse.decode_u64_le(r7[2], 0) > 0, true)
+        check("OPEN open_flags slot is clean", fuse.decode_u32_le(r7[2], 8), 0)
     ## fuse_read_in is fh@0, offset@8, size@16. Writing size at 8 instead put a
     ## 5 into the low half of the 64-bit offset and made the loop read ~5PiB
     ## past the file, which surfaced as "Bytes index out of bounds" rather than

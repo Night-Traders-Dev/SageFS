@@ -226,7 +226,11 @@ check_int("entry carries a full attr: mode at 56+72", fuse.decode_u32_le(lookr, 
 
 let openr: Bytes = fuse.build_open_response(5, 9)
 check_int("fuse_open_out is 32", bytes_len(openr), 32)
-check_int("fh at 24", fuse.decode_u64_le(openr, 24), 9)
+## fuse_open_out is fh(8) + open_flags(4) + padding(4) after the 16-byte
+## out_header, so fh sits at 16 and open_flags at 24. The builder wrote fh at
+## 24, which is open_flags' slot, and left the real fh slot zeroed.
+check_int("fh at 16", fuse.decode_u64_le(openr, 16), 9)
+check_int("open_flags at 24 is clear", fuse.decode_u32_le(openr, 24), 0)
 
 let writer: Bytes = fuse.build_write_response(5, 4096)
 check_int("fuse_write_out is 24", bytes_len(writer), 24)
