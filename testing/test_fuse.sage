@@ -113,10 +113,12 @@ proc test_build_lookup_response() -> Bool:
     if fuse.decode_u64_le(resp, 64) != 1234:
         print "  FAIL test_build_lookup_response: attr size, got " + str(fuse.decode_u64_le(resp, 64))
         return false
-    if fuse.decode_u32_le(resp, 128) != 33188:
-        print "  FAIL test_build_lookup_response: attr mode, got " + str(fuse.decode_u32_le(resp, 128))
+    ## libfuse fuse_attr: mode at 60 and nlink at 64 relative to the attr,
+    ## which starts at 56 in a fuse_entry_out. The old layout used 72/76.
+    if fuse.decode_u32_le(resp, 116) != 33188:
+        print "  FAIL test_build_lookup_response: attr mode, got " + str(fuse.decode_u32_le(resp, 116))
         return false
-    if fuse.decode_u32_le(resp, 132) != 1:
+    if fuse.decode_u32_le(resp, 120) != 1:
         print "  FAIL test_build_lookup_response: attr nlink"
         return false
     print "  PASS test_build_lookup_response"
@@ -505,7 +507,7 @@ proc test_dispatch_lookup_root():
         print "  FAIL test_dispatch_lookup_root: nodeid not encoded"
         fs.unmount()
         return false
-    if fuse.decode_u32_le(resp, 128) != mode:
+    if fuse.decode_u32_le(resp, 116) != mode:
         print "  FAIL test_dispatch_lookup_root: mode not at attr+72"
         fs.unmount()
         return false

@@ -74,16 +74,16 @@ let FUSE_ENOSPC: Int = -28
 ## wrote the fields at invented positions instead.
 let FUSE_ATTR_SIZE_OFF: Int = 8
 let FUSE_ATTR_BLOCKS_OFF: Int = 16
-let FUSE_ATTR_MODE_OFF: Int = 72
-let FUSE_ATTR_NLINK_OFF: Int = 76
-let FUSE_ATTR_UID_OFF: Int = 80
-let FUSE_ATTR_GID_OFF: Int = 84
-let FUSE_ATTR_BLKSIZE_OFF: Int = 92
+let FUSE_ATTR_MODE_OFF: Int = 60
+let FUSE_ATTR_NLINK_OFF: Int = 64
+let FUSE_ATTR_UID_OFF: Int = 68
+let FUSE_ATTR_GID_OFF: Int = 72
+let FUSE_ATTR_BLKSIZE_OFF: Int = 80
 let FUSE_ATTR_INO_OFF: Int = 0
 
 ## fuse_attr is 104 bytes on the wire; fuse_entry_out adds 40 bytes of nodeid /
 ## generation / validity before it.
-let FUSE_ATTR_LEN: Int = 104
+let FUSE_ATTR_LEN: Int = 88
 let FUSE_ENTRY_OUT_LEN: Int = 144
 let FUSE_INIT_OUT_LEN: Int = 96
 let FUSE_STATFS_OUT_LEN: Int = 136
@@ -783,7 +783,8 @@ proc write_attr(resp: Bytes, off: Int, st: Dict):
     encode_u32_le_to(resp, off + FUSE_ATTR_NLINK_OFF, dict_get_int(st, "nlink", 1))
     encode_u32_le_to(resp, off + FUSE_ATTR_UID_OFF, dict_get_int(st, "uid", 0))
     encode_u32_le_to(resp, off + FUSE_ATTR_GID_OFF, dict_get_int(st, "gid", 0))
-    encode_u64_le_to(resp, off + 88, 0)
+    encode_u32_le_to(resp, off + 76, 0)
+    encode_u32_le_to(resp, off + 84, 0)
     encode_u32_le_to(resp, off + FUSE_ATTR_BLKSIZE_OFF, dict_get_int(st, "blksize", 4096))
 
 ## build_ok_response — Build a minimal success FUSE response header (16 bytes)
@@ -961,14 +962,21 @@ proc build_readdir_response(unique: Int, entries: Array[String]) -> Bytes:
 
 ## build_attr_response — Build a FUSE getattr response (fuse_attr_out, 88 bytes)
 proc build_attr_response(unique: Int, st: Dict) -> Bytes:
-    var resp: Bytes = bytes(16 + FUSE_ATTR_LEN)
-    encode_u32_le_to(resp, 0, 16 + FUSE_ATTR_LEN)
+    ## fuse_attr_out is the 16-byte out_header plus one fuse_attr, so the
+    ## attribute starts at 16 and the reply is 16 + FUSE_ATTR_LEN bytes.
+    ##
+    ## This allocated 16 + FUSE_ATTR_LEN and then started the attribute at 32,
+    ## 16 bytes past the end, so write_attr's last field landed out of bounds.
+    ## The bytecode backend silently dropped those writes and produced a
+    ## plausible short reply; the C backend wrote past the buffer and later
+    ## failed allocation. It also wrote an entry_out-style nlookup at 16, which
+    ## fuse_attr_out does not have.
+    let total: Int = 16 + FUSE_ATTR_LEN
+    var resp: Bytes = bytes(total)
+    encode_u32_le_to(resp, 0, total)
     encode_i32_le_to(resp, 4, 0)
     encode_u64_le_to(resp, 8, unique)
-    encode_u64_le_to(resp, 16, 1)
-    encode_u32_le_to(resp, 24, 0)
-    encode_u32_le_to(resp, 28, 0)
-    write_attr(resp, 32, st)
+    write_attr(resp, 16, st)
     return resp
 
 ## fuse_run — Main FUSE event loop

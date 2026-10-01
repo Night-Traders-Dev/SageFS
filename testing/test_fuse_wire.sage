@@ -207,22 +207,33 @@ check_int("errno carried as a negative", fuse.decode_i32_le(errr, 4), -2)
 check_int("errno byte 0 is two's complement of 2", errr[4], 0xFE)
 
 let attrr: Bytes = fuse.build_attr_response(5, st)
-check_int("fuse_attr_out is 16 + 104", bytes_len(attrr), 120)
-check_int("attr length field", fuse.decode_u32_le(attrr, 0), 120)
-check_int("attr ino at attr+0", fuse.decode_u64_le(attrr, 32), 3)
-check_int("attr size at attr+8", fuse.decode_u64_le(attrr, 40), 100)
-check_int("attr blocks at attr+16", fuse.decode_u64_le(attrr, 48), 8)
-check_int("attr mode at attr+72", fuse.decode_u32_le(attrr, 104), 33188)
-check_int("attr nlink at attr+76", fuse.decode_u32_le(attrr, 108), 1)
-check_int("attr uid at attr+80", fuse.decode_u32_le(attrr, 112), 1000)
-check_int("attr gid at attr+84", fuse.decode_u32_le(attrr, 116), 1000)
+## fuse_attr_out is the 16-byte out_header plus one fuse_attr, and the attr
+## starts at 16. It used to be written at 32 into a buffer sized for 16, which
+## put the last fields out of bounds: the bytecode backend dropped them and
+## returned a plausible short reply, the C backend wrote past the end.
+check_int("fuse_attr_out is 16 + 88", bytes_len(attrr), 104)
+check_int("attr length field", fuse.decode_u32_le(attrr, 0), 104)
+## libfuse fuse_attr, ABI 7.26: ino@0 size@8 blocks@16 atime@24 mtime@32
+## ctime@40, then the three nsecs at 48/52/56, mode@60 nlink@64 uid@68 gid@72
+## rdev@76 blksize@80 flags@84. The old layout put mode at 72 and blksize at
+## 92, and wrote rdev as a u64 at 88 so it overlapped blksize.
+check_int("attr ino at attr+0", fuse.decode_u64_le(attrr, 16), 3)
+check_int("attr size at attr+8", fuse.decode_u64_le(attrr, 24), 100)
+check_int("attr blocks at attr+16", fuse.decode_u64_le(attrr, 32), 8)
+check_int("attr mode at attr+60", fuse.decode_u32_le(attrr, 76), 33188)
+check_int("attr nlink at attr+64", fuse.decode_u32_le(attrr, 80), 1)
+## The reply must be long enough for every field write_attr makes.
+check_int("attr reply holds blksize@80", bytes_len(attrr) >= 16 + 88, true)
+check_int("attr flags slot is written", fuse.decode_u32_le(attrr, 100) == 0, true)
+check_int("attr uid at attr+68", fuse.decode_u32_le(attrr, 84), 1000)
+check_int("attr gid at attr+72", fuse.decode_u32_le(attrr, 88), 1000)
 
 let lookr: Bytes = fuse.build_lookup_response(5, st)
 check_int("fuse_entry_out is 16 + 128", bytes_len(lookr), 144)
 check_int("entry length field", fuse.decode_u32_le(lookr, 0), 144)
 check_int("nodeid at 16", fuse.decode_u64_le(lookr, 16), 3)
 check_int("entry carries a full attr: size at 56+8", fuse.decode_u64_le(lookr, 64), 100)
-check_int("entry carries a full attr: mode at 56+72", fuse.decode_u32_le(lookr, 128), 33188)
+check_int("entry carries a full attr: mode at 56+60", fuse.decode_u32_le(lookr, 116), 33188)
 
 let openr: Bytes = fuse.build_open_response(5, 9)
 check_int("fuse_open_out is 32", bytes_len(openr), 32)

@@ -70,14 +70,31 @@ proc put_u64(buf: Bytes, off: Int, v: Int):
 ## short read means the reply has not been written yet, not that the peer is
 ## done. Blocking is the loop's job, and read(2) already blocks.
 proc read_exact(fd: Int, want: Int) -> Bytes:
-    let p = mem_alloc(want)
-    let n: Int = ffi.call(lib, "read", "int", [fd, p, want])
+    ## Loop until `want` bytes arrive, or give up.
+    ##
+    ## A single read(2) is not enough. These are stream sockets, so a read may
+    ## return fewer bytes than asked for without meaning end of stream, and a
+    ## short header read leaves the rest of the header in the buffer, which
+    ## silently shifts every subsequent reply: the length field then comes from
+    ## payload bytes and the body read runs into the next reply. It reproduced
+    ## only under the C backend, where timing made short reads likely, which
+    ## made it look like a native code generation bug.
     let out: Bytes = bytes(want)
-    if n > 0:
+    let p = mem_alloc(want)
+    var got: Int = 0
+    while got < want:
+        ## Read into the start of the buffer and copy forward, rather than
+        ## advancing the pointer. Pointer arithmetic on a mem_alloc result is
+        ## not usable: the interpreter raises "value + number" and the C backend
+        ## silently returns 0 for the same expression.
+        let n: Int = ffi.call(lib, "read", "int", [fd, p, want - got])
+        if n <= 0:
+            break
         var i: Int = 0
         while i < n:
-            out[i] = mem_read(p, i, "byte")
+            out[got + i] = mem_read(p, i, "byte")
             i = i + 1
+        got = got + n
     mem_free(p)
     return out
 
