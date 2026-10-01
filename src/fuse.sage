@@ -984,29 +984,43 @@ proc build_attr_response(unique: Int, st: Dict) -> Bytes:
 ##   6. Encode response (fuse_out_header + payload)
 ##   7. Write response to /dev/fuse via libc.write()
 ##   8. On FUSE_DESTROY, unmount and exit loop
-proc fuse_run(fs: vfs.VFS, mountpoint: String):
+## fuse_run — mount and serve.
+##
+## `fd` is -1 normally, meaning open /dev/fuse and mount as usual. Passing a
+## descriptor runs the loop against an already-attached channel and skips the
+## mount, which is how testing/test_fuse_loop.sage drives this loop on a host
+## where mounting is not permitted. It is a parameter rather than a second entry
+## point so the loop body is the same code either way -- a test that called a
+## separate function would exercise a copy, and copies go stale.
+proc fuse_run(fs: vfs.VFS, mountpoint: String, fd: Int = -1):
     if libc_lib == nil and not fuse_init_libc():
         print("FUSE: libc unavailable; cannot run the FUSE loop")
         return
 
-    ## O_RDWR on /dev/fuse, then mount. Both are required: the descriptor is
-    ## what the kernel reads requests from, and the mount is what makes this
-    ## process the filesystem at `mountpoint`. Opening the device alone leaves
-    ## the loop reading from a device no filesystem is attached to.
-    fuse_fd = ffi.call(libc_lib, "open", "int", ["/dev/fuse", 2, 0])
-    if fuse_fd < 0:
-        print("FUSE: cannot open /dev/fuse (is the fuse module loaded?)")
-        return
+    var mounted: Bool = true
+    if fd < 0:
+        ## O_RDWR on /dev/fuse, then mount. Both are required: the descriptor is
+        ## what the kernel reads requests from, and the mount is what makes this
+        ## process the filesystem at `mountpoint`. Opening the device alone leaves
+        ## the loop reading from a device no filesystem is attached to.
+        fd = ffi.call(libc_lib, "open", "int", ["/dev/fuse", 2, 0])
+        if fd < 0:
+            print("FUSE: cannot open /dev/fuse (is the fuse module loaded?)")
+            return
+        print("FUSE: opened /dev/fuse (fd=" + str(fd) + ")")
+        mounted = fuse_mount(mountpoint, fd)
+    else:
+        print("FUSE: descriptor supplied (fd=" + str(fd) + "), skipping mount")
+    fuse_fd = fd
 
-    print("FUSE: opened /dev/fuse (fd=" + str(fuse_fd) + ")")
-
-    if not fuse_mount(mountpoint, fuse_fd):
+    if not mounted:
         print("FUSE: could not mount on " + mountpoint)
         ffi.call(libc_lib, "close", "int", [fuse_fd])
         fuse_fd = -1
         return
 
-    print("FUSE: mounted on " + mountpoint)
+    if mountpoint != "":
+        print("FUSE: mounted on " + mountpoint)
 
     let HEADER_SIZE: Int = FUSE_IN_HEADER_LEN
     let buf_size: Int = 1048576
