@@ -39,7 +39,7 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 33/33 files, 1077 assertions, all passing** under the bytecode VM
+**Tests: 34/34 files, 1122 assertions, all passing** under the bytecode VM
 (`./sagemake test`). The C backend compiles all 30 modules, but the assertion
 suite is run on the bytecode VM only, so a native regression would not be caught
 by it. See [Known issues](#known-issues) for what is still broken.
@@ -69,7 +69,15 @@ by it. See [Known issues](#known-issues) for what is still broken.
   string for any input
 - ❌ **Online scrub** — `scrub_cli.sage` compares each block against a freshly
   built empty tree, so it can never detect a mismatch
-- ❌ **Repair-on-read** — not implemented
+- ✅ **Repair-on-read** — `Raid5Array` in `raid.sage` is a byte-level RAID5 over real
+  devices or image files. A lost block is rebuilt by XOR-ing the survivors with the
+  parity block and written back to the failed device during the read, so the damage is
+  fixed while the surviving copy is still known to exist rather than on the next boot.
+  Reconstructing without writing back would leave the array one device failure from
+  total loss. Two failures in one stripe cannot be rebuilt from one parity block and
+  are **refused** rather than answered with zeros. Parity is per byte — the existing
+  `compute_parity()` folds block *numbers*, which simulates the mapping but cannot
+  rebuild anything.
 
 ### 📸 Snapshots & Subvolumes
 - ✅ **CoW B+ tree** — real copy-on-write with generation counters, sibling

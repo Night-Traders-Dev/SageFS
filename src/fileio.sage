@@ -40,6 +40,20 @@ proc open_rw(path: String) -> Int:
         return -1
     return ffi.call(libc_handle, "open", "int", [path, 577, 420])
 
+## ffio_open_rdw — open(path, O_RDWR|O_CREAT, 0644): no truncation.
+##
+## Not the same as open_rw(), and the difference is not cosmetic. O_TRUNC drops
+## the file to zero length the moment it is opened, so a "write at offset N"
+## built on open_rw() destroys everything below N and leaves a hole above it --
+## the write appears to succeed and returns the right byte count while silently
+## erasing the file. Anything that places a block inside an existing file needs
+## this instead.
+proc open_rdw(path: String) -> Int:
+    if not init():
+        return -1
+    ## O_RDWR|O_CREAT = 2|64 = 66.
+    return ffi.call(libc_handle, "open", "int", [path, 66, 420])
+
 ## ffio_open_append — open(path, O_WRONLY|O_APPEND|O_CREAT, 0644).
 proc open_append(path: String) -> Int:
     if not init():
@@ -127,6 +141,28 @@ proc write(fd: Int, buf: Bytes) -> Int:
         return -1
     let put: Int = ffi.call(libc_handle, "write", "int", [fd, ptr, n])
     mem_free(ptr)
+    return put
+
+## write_at — Write all of buf at `offset`, without truncating the file.
+##
+## The ranged counterpart to read_at(). io.writebytes() replaces the whole file,
+## so the only way to place a block was to rebuild the entire image in memory
+## each time -- which silently works right up until the image is large enough
+## that bytes() returns an empty buffer for it, and then the block lands at
+## offset 0. Seeks and writes instead, so a write costs one block of I/O
+## regardless of volume size. Returns bytes written, or negative on failure.
+proc write_at(path: String, offset: Int, buf: Bytes) -> Int:
+    let n: Int = bytes_len(buf)
+    if n <= 0:
+        return 0
+    let fd: Int = open_rdw(path)
+    if fd < 0:
+        return -1
+    if seek(fd, offset) < 0:
+        close(fd)
+        return -1
+    let put: Int = write(fd, buf)
+    close(fd)
     return put
 
 ## slice_bytes — A Bytes covering buf[start, end).
