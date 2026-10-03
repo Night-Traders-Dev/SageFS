@@ -65,7 +65,7 @@ by it. See [Known issues](#known-issues) for what is still broken.
   `REC_UPDATE`, so the log is structurally present and semantically empty.
 - ⚠️ **Checkpoint packs** — structures and (de)serialisation exist; `mkfs` never
   writes them and nothing reads them back
-- ❌ **SHA-256** — `checksum.sage` returns the hard-coded digest of the empty
+- ❌ **SHA-256** — implemented and verified against NIST vectors on the bytecode VM, but the C backend **segfaults** executing the function, so it is not enabled. The crash is non-monotonic in round count: 64 rounds runs clean, 63 segfaults, as do 48/56/60, while 40 does not. That rules out resource exhaustion and points at memory handling in the C backend for functions of this shape, so this is blocked on a codegen fix rather than on the algorithm. The stub returns the hard-coded digest of the empty string, so **every block currently hashes identically** and dedup cannot distinguish two different blocks.
   string for any input
 - ❌ **Online scrub** — `scrub_cli.sage` compares each block against a freshly
   built empty tree, so it can never detect a mismatch
