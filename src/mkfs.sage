@@ -115,6 +115,10 @@ proc parse_args(args: Array) -> Dict:
         i = i + 1
     return opts
 
+## io.readbytes() refuses a whole-file read past this and returns nil with no
+## error, so a larger image silently mounts as empty.
+let WHOLE_FILE_READ_CEILING: Int = 104857600
+
 proc format_device(dev: String, opts: Dict) -> Bool:
     let block_size = opts["block_size"]
     let segment_size = opts["segment_size"]
@@ -127,6 +131,17 @@ proc format_device(dev: String, opts: Dict) -> Bool:
         return false
 
     print "Formatting " + dev + " as SageFS..."
+    ## Refuse before writing anything.
+    ##
+    ## The existence check used to sit *after* write_image(), which had already
+    ## created the file -- so mkfs created the image and then reported "already
+    ## exists (use --force)" about the file it had just made. Removing the file
+    ## first did not help, because the check ran after the write every time.
+    ## Worse, the write clobbered an existing image on the way to the error.
+    if io.filesize(dev) > 0 and not opts["force"]:
+        print "error: " + dev + " already exists (use --force to overwrite)"
+        return false
+
     let sb = superblock.create_superblock(total_blocks, opts["label"], block_size, segment_size, {"checksum_algo": superblock.CHECKSUM_CRC32C})
     let buf = sb.serialize()
 
@@ -164,9 +179,16 @@ proc format_device(dev: String, opts: Dict) -> Bool:
     ## worse than an image that matches what the format can actually support.
     ## Until reads are ranged rather than whole-file, --size governs the
     ## superblock's block count and the image follows the metadata.
+    ## image_size is the *volume* size requested, not the length of the metadata
+    ## buffer. Deriving it from bytes_len(buf) -- which is only the superblock
+    ## plus the inode area, about 64 KiB -- left the superblock claiming 256 MiB
+    ## while the file was 64 KiB, so total_blocks described blocks that did not
+    ## exist. The volume was unusable and nothing complained: a scrub that
+    ## compares the file against its own superblock is the first thing to
+    ## notice, and it fails immediately.
     let min_image_size = sb.inode_entry_start_blk * sb.block_size + sb.inode_entry_byte_size
-    if bytes_len(buf) > min_image_size:
-        sb.image_size = bytes_len(buf)
+    if size_bytes > min_image_size:
+        sb.image_size = size_bytes
     else:
         sb.image_size = min_image_size
 
@@ -193,9 +215,21 @@ proc format_device(dev: String, opts: Dict) -> Bool:
             print "error: could not size " + dev + " to " + str(sb.image_size) + " bytes"
             return false
 
-    if io.filesize(dev) > 0 and not opts["force"]:
-        print "error: " + dev + " already exists (use --force to overwrite)"
-        return false
+    ## Report the whole-file read ceiling rather than leaving it to be found at
+    ## mount time. imgio.read_image() goes through io.readbytes(), which returns
+    ## nil past 100 MiB with no error, so a volume above that opens as an empty
+    ## one and the mount reports a corrupt superblock. Producing it is still the
+    ## right thing to do -- --size asked for it and the layout supports it -- but
+    ## the operator should hear about it from mkfs.
+    if sb.image_size > WHOLE_FILE_READ_CEILING:
+        let got: String = str(sb.image_size)
+        let cap: String = str(WHOLE_FILE_READ_CEILING)
+        print ""
+        print "warning: this volume is " + got + " bytes, above the " + cap + " byte limit"
+        print "         of the whole-file read path. Mount currently loads the entire image"
+        print "         into memory, so mount will refuse it until ranged reads replace the"
+        print "         whole-file path."
+        print ""
 
     print "  label        : " + sb.label
     print "  uuid         : " + sb.uuid

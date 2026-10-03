@@ -165,6 +165,20 @@ proc write_at(path: String, offset: Int, buf: Bytes) -> Int:
     close(fd)
     return put
 
+## size_of — Length of a file in bytes, or -1 if it cannot be opened.
+##
+## Not the same as size(fd): that one needs an open descriptor, and the tools
+## that want to know how big an image is have none yet. Reuses size()'s
+## lseek-to-end rather than stat(), because the FFI returns only an int and
+## st_size would have to be read back out of the struct by hand.
+proc size_of(path: String) -> Int:
+    let fd: Int = open_rd(path)
+    if fd < 0:
+        return -1
+    let n: Int = size(fd)
+    close(fd)
+    return n
+
 ## slice_bytes — A Bytes covering buf[start, end).
 ##
 ## slice() on a Bytes returns an *array of numbers*, not a Bytes. It matches what
