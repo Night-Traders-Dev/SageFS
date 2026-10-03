@@ -9,11 +9,10 @@
 ## unrecognised flag is consumed by it -- so "--ref" arrives as the image path
 ## and the tool reports it cannot open a file called "--ref".
 ##
-## The process exit status is always 0 and cannot be set from here: sys.exit()
-## does not exist in this runtime, and sys_module.exit() is not reachable from
-## user code. Scripts must read the trailing SCRUB VERDICT line instead of
-## trusting $?. The library API (Scrubber.scrub() -> ScrubResult.verdict) is
-## unaffected and is what tests and callers should use.
+## The exit status is the verdict, so `scrub image ref || echo bad` works. A
+## trailing SCRUB VERDICT line is printed as well: it survives being piped
+## through tee, where $? reports tee's status rather than this process's.
+## Library callers should use Scrubber.scrub() -> ScrubResult.verdict instead.
 ##
 ## sys.args() does NOT include the program name, so the image is args[0]. The
 ## previous version read args[1] while requiring two or more arguments, which
@@ -26,6 +25,8 @@ import scrub
 proc main(args: Array):
     if len(args) < 1:
         print "Usage: scrub_cli.sage <image> [<known-good-image>]"
+        print "SCRUB VERDICT: ERROR"
+        sys.exit(scrub.SCRUB_ERROR)
     let image_path = args[0]
     ## Optional second positional: the known-good image to verify against.
     var reference: String = ""
@@ -35,6 +36,8 @@ proc main(args: Array):
     let s = scrub.Scrubber(image_path)
     if not s.ok():
         print "scrub: " + s.error()
+        print "SCRUB VERDICT: ERROR"
+        sys.exit(scrub.SCRUB_ERROR)
 
     let info = s.info()
     print "Scrubbing '" + image_path + "'"
@@ -47,8 +50,8 @@ proc main(args: Array):
         print "  reference:    " + reference
 
     let r = s.scrub(reference)
-    print ""
     let examined: String = str(r.blocks_examined) + "/" + str(r.total_blocks) + " (" + str(r.coverage_pct()) + "%)"
+    print ""
     print "  Blocks examined: " + examined
     print "  Mismatches:      " + str(r.mismatches)
     print "  Unreadable:      " + str(r.unreadable)
@@ -64,7 +67,9 @@ proc main(args: Array):
     else:
         print "  Status: ERROR -- could not scrub"
 
-    ## Single line for scripts and CI to match on.
+    ## Both channels, on purpose: the exit status for scripts that do
+    ## `scrub img ref || fail`, and this line for anyone who piped us through tee
+    ## and is about to trust tee's status instead of ours.
     if r.verdict == scrub.SCRUB_OK:
         print "SCRUB VERDICT: OK"
     elif r.verdict == scrub.SCRUB_INCONCLUSIVE:
@@ -73,5 +78,6 @@ proc main(args: Array):
         print "SCRUB VERDICT: DAMAGE"
     else:
         print "SCRUB VERDICT: ERROR"
+    sys.exit(r.verdict)
 
 main(sys.args())

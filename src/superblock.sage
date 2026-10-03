@@ -435,6 +435,12 @@ class SageFSSuperblock:
         self.inode_entry_byte_size = 0  # size of inode entry area in bytes
         self.journal_start_blk = 0      # block offset for the journal region
         self.journal_block_count = 0    # blocks reserved for the journal; 0 = disabled
+        ## Per-block checksum region. 0 = none. Packed after the superblock's
+        ## own checksum field at offset 476, because every byte below that is a
+        ## live field and a gap here would shift the absolute offsets
+        ## deserialize() reads against volumes already on disk.
+        self.csum_start_blk = 0
+        self.csum_block_count = 0
 
         # -- extent tree --
         # The B+ tree that maps (inode, offset) -> block.  Its root has to be
@@ -676,6 +682,16 @@ class SageFSSuperblock:
         # new caller cannot reintroduce the same staleness.
         self.checksum = self.compute_checksum()
         write_le32(buf, self.checksum)        # 476
+        ## -- per-block checksum region (must follow the superblock checksum) --
+        ## Deliberately NOT part of compute_checksum()'s payload. That function
+        ## concatenates named fields, so folding these in would change the stored
+        ## checksum of every volume formatted before this field existed, and
+        ## verify_checksum() would then fail on all of them. fsck's first check is
+        ## fatal, so that reports every old volume as corrupt. Leaving them out
+        ## costs only self-coverage of a region pointer.
+        write_le64(buf, self.csum_start_blk)     # 480
+        write_le32(buf, self.csum_block_count)   # 488
+
 
         return buf
 
@@ -715,6 +731,8 @@ class SageFSSuperblock:
         d["max_mount_count"] = self.max_mount_count
         d["state"] = self.state
         d["image_size"] = self.image_size
+        d["csum_start_blk"] = self.csum_start_blk
+        d["csum_block_count"] = self.csum_block_count
         d["inode_entry_start_blk"] = self.inode_entry_start_blk
         d["journal_start_blk"] = self.journal_start_blk
         d["journal_block_count"] = self.journal_block_count
@@ -829,6 +847,18 @@ proc deserialize_superblock(buf: Bytes) -> SageFSSuperblock:
     else:
         sb.extent_root_blk = 0
         sb.extent_generation = 0
+
+    ## Per-block checksum region (added after the extent fields). Guarded on
+    ## buffer length as well as version: a v1.5 volume formatted before this field
+    ## existed carries the same version number, so reading 8 bytes past its
+    ## shorter superblock would pick up whatever follows it. Zero means "no
+    ## region", which is the honest answer for such a volume.
+    if bytes_len(buf) >= 496:
+        sb.csum_start_blk = read_le64(buf, 480)
+        sb.csum_block_count = read_le32(buf, 488)
+    else:
+        sb.csum_start_blk = 0
+        sb.csum_block_count = 0
 
     if sb.version_minor >= 4:
         sb.checksum = read_le32(buf, 476)

@@ -39,8 +39,8 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 35/35 files, 1162 assertions, all passing** under the bytecode VM
-(`./sagemake test`). The C backend compiles all 31 modules, but the assertion
+**Tests: 36/36 files, 1204 assertions, all passing** under the bytecode VM
+(`./sagemake test`). The C backend compiles all 32 modules, but the assertion
 suite is run on the bytecode VM only, so a native regression would not be caught
 by it. See [Known issues](#known-issues) for what is still broken.
 
@@ -67,16 +67,26 @@ by it. See [Known issues](#known-issues) for what is still broken.
   writes them and nothing reads them back
 - ❌ **SHA-256** — implemented and verified against NIST vectors on the bytecode VM, but the C backend **segfaults** executing the function, so it is not enabled. The crash is non-monotonic in round count: 64 rounds runs clean, 63 segfaults, as do 48/56/60, while 40 does not. That rules out resource exhaustion and points at memory handling in the C backend for functions of this shape, so this is blocked on a codegen fix rather than on the algorithm. The stub returns the hard-coded digest of the empty string, so **every block currently hashes identically** and dedup cannot distinguish two different blocks.
   string for any input
-- ✅ **Online scrub** — `scrub.sage` verifies a volume block by block against a known-good
-  reference image and reports **OK / DAMAGE / INCONCLUSIVE / ERROR**. It replaces a tool
-  that built a fresh `ChecksumTree`, found nothing recorded in it, compared nothing, and
-  then printed "filesystem is clean" — a checker that cannot fail. Truncation is caught
-  by comparing file length against the superblock before comparing anything, so a short
-  volume cannot match across its missing tail. Block size and block count must match the
-  reference or the scrub is refused rather than reporting every block as different. Reads
-  are ranged, so the old 100 MiB whole-file ceiling no longer limits coverage.
-  **Not yet:** online scrub of a *live* volume, and per-block checksum persistence — the
-  write path still stores no checksum region, so verification needs an external reference.
+- ✅ **Online scrub** — `scrub.sage` verifies a volume block by block and reports
+  **OK / DAMAGE / INCONCLUSIVE / ERROR**. It replaces a tool that built a fresh
+  `ChecksumTree`, found nothing recorded in it, compared nothing, and then printed
+  "filesystem is clean" — a checker that cannot fail, trusted, and always wrong in
+  the direction that hides damage. Two modes:
+  - **Against a reference image** — every block compared byte for byte.
+  - **Against the volume's own checksum region** (`csum.sage`) — one LE32 per block,
+    written by `VFS._write_block()` as data lands, so a mounted volume can be
+    scrubbed with nothing external to compare it to.
+
+  Truncation is caught by comparing file length against the superblock's `image_size`
+  before any block comparison, so a short volume cannot match across its missing
+  tail. Coverage is reported against blocks actually verified, and a volume whose
+  region is still empty returns **INCONCLUSIVE**, not OK — calling that a pass would
+  be the original bug verbatim. The region is carved off the *end* of the allocatable
+  range, so adding it shifted no existing absolute block number, and `total_blocks`
+  excludes it so no allocator can ever hand it out.
+
+  **Not yet:** checksums are recorded but not yet verified on the read path, so a
+  corrupt block is found by `scrub`, not by the read that hits it.
   built empty tree, so it can never detect a mismatch
 - ✅ **Repair-on-read** — `Raid5Array` in `raid.sage` is a byte-level RAID5 over real
   devices or image files. A lost block is rebuilt by XOR-ing the survivors with the

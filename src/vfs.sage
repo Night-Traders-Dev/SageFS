@@ -6,6 +6,7 @@
 ## extent, directory, journal, cache, and async I/O modules.
 
 import superblock
+import csum
 import segment as seg_module
 import nat as nat_module
 import allocator as alloc_module
@@ -78,6 +79,8 @@ class VFS:
         self.image_path = image_path
         self.mounted = false
         self.sb = nil
+        ## Lazily built; nil means the volume has no checksum region.
+        self.csum_region_cache = nil
         self.fds = []
         self.next_fd = 0
         self.image_buf = bytes()
@@ -161,6 +164,41 @@ class VFS:
         while i < bs and i < bytes_len(data):
             bytes_set(self.image_buf, offset + i, bytes_get(data, i))
             i = i + 1
+        ## Record the checksum after the bytes are in place, from the buffer
+        ## rather than from `data`.
+        ##
+        ## `data` may be shorter than a block (a tail write) or longer than the
+        ## region covers, so hashing it would describe a block the volume does
+        ## not actually hold -- and scrub would then report a mismatch on a
+        ## block that was never wrong. Reading back what was really written
+        ## costs one block copy and cannot disagree with the disk.
+        self._record_csum(blk_addr)
+
+    ## _csum_region — The checksum region for this volume, or nil if it has none.
+    ## Built once and cached; a volume formatted before the region existed has
+    ## csum_start_blk == 0 and never gets one.
+    proc _csum_region(self):
+        if self.csum_region_cache != nil:
+            return self.csum_region_cache
+        if self.sb == nil:
+            return nil
+        if self.sb.csum_start_blk <= 0 or self.sb.csum_block_count <= 0:
+            return nil
+        self.csum_region_cache = csum.CsumRegion(self.image_buf, self._init_block_size(),
+                                                self.sb.csum_start_blk, self.sb.csum_block_count)
+        return self.csum_region_cache
+
+    ## _record_csum — Store the checksum of one block. Silent no-op without a region.
+    proc _record_csum(self, blk_addr: Int):
+        let r = self._csum_region()
+        if r == nil:
+            return
+        ## Never checksum the region itself: writing an entry changes the block
+        ## that holds it, so its own recorded checksum would be stale the moment
+        ## it was stored, and every scrub would flag the region as corrupt.
+        if blk_addr >= self.sb.csum_start_blk:
+            return
+        r.record(blk_addr, self.sb.checksum_algo)
 
     proc _alloc_block_addr(self, temperature: String) -> Dict:
         let result = self.allocator.allocate_data_block(temperature)

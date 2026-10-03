@@ -123,7 +123,33 @@ proc format_device(dev: String, opts: Dict) -> Bool:
     let block_size = opts["block_size"]
     let segment_size = opts["segment_size"]
     let size_bytes = opts["size_mb"] * 1024 * 1024
-    let total_blocks = size_bytes / block_size
+    ## Blocks in the whole image, including the checksum region at the end.
+    let image_blocks = size_bytes / block_size
+
+    ## Reserve the per-block checksum region before anything else looks at
+    ## total_blocks, and shrink total_blocks to exclude it.
+    ##
+    ## Shrinking rather than merely recording the boundary is what keeps the
+    ## region safe: every allocator in here respects total_blocks, so a region
+    ## carved off the end of the allocatable range cannot be handed out, whereas
+    ## a region marked off inside it would eventually be allocated over -- and an
+    ## overwritten checksum entry reads as "untracked", so the loss is silent.
+    ## Same arithmetic as csum.region_blocks_for(), inlined.
+    ##
+    ## Not a stylistic choice. Calling csum.region_blocks_for() here compiles and
+    ## links fine, but the resulting mkfs binary then fails imgio.truncate_to() --
+    ## the volume is left 33 KB and mkfs reports "could not size ... to 268435456
+    ## bytes". Bytecode mkfs with the identical source formats the volume correctly,
+    ## and a standalone program that imports csum, calls region_blocks_for(), and
+    ## then truncates works when compiled. So this is a whole-program defect in the
+    ## C backend, not a mistake in this call.
+    ##
+    ## Workaround until that is fixed: keep the formula here, and let
+    ## test_csum.sage assert it agrees with csum.region_blocks_for(), so the two
+    ## cannot drift apart unnoticed.
+    let csum_entries: Int = image_blocks * 4
+    let csum_blocks: Int = int((csum_entries + block_size - 1) / block_size)
+    let total_blocks: Int = image_blocks - csum_blocks
 
     if total_blocks / segment_size < 64:
         print "error: volume too small — need at least 64 segments"
@@ -143,6 +169,13 @@ proc format_device(dev: String, opts: Dict) -> Bool:
         return false
 
     let sb = superblock.create_superblock(total_blocks, opts["label"], block_size, segment_size, {"checksum_algo": superblock.CHECKSUM_CRC32C})
+    ## Region sits immediately above the allocatable range.
+    sb.csum_start_blk = total_blocks
+    sb.csum_block_count = csum_blocks
+    ## The file covers the region too, so image_size counts image_blocks, not
+    ## total_blocks. Anything deriving a length from total_blocks would otherwise
+    ## see a short volume and call it truncated.
+    sb.image_size = image_blocks * block_size
     let buf = sb.serialize()
 
     let readme: String = ""
@@ -236,6 +269,7 @@ proc format_device(dev: String, opts: Dict) -> Bool:
     print "  block_size   : " + str(block_size) + " bytes"
     print "  segment_size : " + str(segment_size) + " blocks"
     print "  total_blocks : " + str(total_blocks)
+    print "  csum region  : blocks " + str(sb.csum_start_blk) + ".." + str(sb.csum_start_blk + sb.csum_block_count)
     print "  free_segments: " + str(sb.free_segments)
     verify_image(dev)
     return true

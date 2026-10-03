@@ -85,6 +85,20 @@ proc read_superblock(path: String) -> Dict:
     out["block_size"] = read_le32(head, 12)
     out["total_blocks"] = read_le64(head, 28)
     out["checksum_algo"] = read_le32(head, 388)
+    ## Per-block checksum region, added after the extent fields. Guarded on
+    ## length for the same reason as in superblock.deserialize(): a volume
+    ## formatted before this field existed is the same version number.
+    if bytes_len(head) >= 496:
+        out["csum_start_blk"] = read_le64(head, 480)
+        out["csum_block_count"] = read_le32(head, 488)
+    else:
+        out["csum_start_blk"] = 0
+        out["csum_block_count"] = 0
+    ## image_size is authoritative for "how long should this file be". Deriving
+    ## it from total_blocks was wrong once the checksum region was carved off the
+    ## end: total_blocks excludes the region, so a perfectly good volume looked
+    ## truncated by exactly the region's size.
+    out["image_size"] = read_le64(head, 424)
     return out
 
 proc algo_name(a: Int) -> String:
@@ -135,6 +149,64 @@ class Scrubber:
             return 0
         return self.sb["total_blocks"]
 
+    ## _scrub_region — Verify data blocks against the volume's own checksum region.
+    ##
+    ## Reads the image once and checks each tracked block. Coverage is reported
+    ## against the *tracked* blocks, not the whole volume: a fresh volume has an
+    ## all-zero region and nothing to check, and calling that a pass would be the
+    ## same lie as before. If nothing is tracked the verdict is INCONCLUSIVE.
+    proc _scrub_region(self, total: Int, bs: Int, algo: Int) -> ScrubResult:
+        let r = ScrubResult(SCRUB_OK)
+        r.total_blocks = total
+        let size: Int = fileio.size_of(self.image_path)
+        if size < self.sb["image_size"]:
+            r.verdict = SCRUB_DAMAGE
+            r.note("image is " + str(size) + " bytes but the superblock describes "
+                   + str(self.sb["image_size"]))
+            return r
+        ## Bounded read of the region only, not the whole image.
+        let region: Bytes = fileio.read_at(self.image_path,
+                                           self.sb["csum_start_blk"] * bs,
+                                           self.sb["csum_block_count"] * bs)
+        var tracked: Int = 0
+        var mismatches: Int = 0
+        var unreadable: Int = 0
+        var b: Int = 0
+        while b < total:
+            let eoff: Int = b * 4
+            if eoff + 4 > bytes_len(region):
+                break
+            let expected: Int = read_le32(region, eoff)
+            if expected == 0:
+                ## Untracked. Not a pass, not a failure -- just unexamined.
+                b = b + 1
+                continue
+            tracked = tracked + 1
+            let blk: Bytes = fileio.read_at(self.image_path, b * bs, bs)
+            if bytes_len(blk) < bs:
+                unreadable = unreadable + 1
+                if unreadable <= 10:
+                    r.note("unreadable block " + str(b))
+            elif checksum_block(blk, algo) != expected:
+                mismatches = mismatches + 1
+                if mismatches <= 10:
+                    r.note("checksum mismatch at block " + str(b))
+            b = b + 1
+        r.blocks_examined = tracked
+        r.mismatches = mismatches
+        r.unreadable = unreadable
+        r.note("verified " + str(tracked) + " of " + str(total) + " blocks against "
+               + "the on-disk checksum region")
+        if tracked == 0:
+            ## Nothing to verify against. Saying OK here would repeat the original
+            ## bug exactly: a clean report for a check that never ran.
+            r.verdict = SCRUB_INCONCLUSIVE
+            r.note("the checksum region is empty -- nothing has been recorded yet")
+            return r
+        if mismatches > 0 or unreadable > 0:
+            r.verdict = SCRUB_DAMAGE
+        return r
+
     ## scrub — Verify the volume against a reference image.
     proc scrub(self, reference_path: String) -> ScrubResult:
         if not self.ok():
@@ -156,7 +228,8 @@ class Scrubber:
         ## zero-filled tail matches a zero-filled reference: a clean report for
         ## blocks that were never written.
         let size: Int = fileio.size_of(self.image_path)
-        let want: Int = total * bs
+        ## Compare against the superblock's own image_size, not total * bs.
+        let want: Int = self.sb["image_size"]
         if size < want:
             r.verdict = SCRUB_DAMAGE
             r.note("image is " + str(size) + " bytes but the superblock describes "
@@ -165,12 +238,18 @@ class Scrubber:
             return r
 
         if reference_path == "":
-            ## The write path never persists a per-block checksum region, so
-            ## there is nothing on disk to verify the data against. Say so.
-            r.verdict = SCRUB_INCONCLUSIVE
-            r.note("no reference supplied and this volume stores no per-block "
-                   + "checksum region, so no data block can be verified")
-            return r
+            ## No reference: fall back to the volume's own checksum region. This
+            ## is what makes scrub usable on a mounted volume with nothing to
+            ## compare it to, which until now was the only mode it had -- and it
+            ## reported "clean" after verifying nothing.
+            if self.sb["csum_start_blk"] <= 0 or self.sb["csum_block_count"] <= 0:
+                r.verdict = SCRUB_INCONCLUSIVE
+                r.note("no reference supplied and this volume stores no per-block "
+                       + "checksum region, so no data block can be verified")
+                return r
+            let algo: Int = self.sb["checksum_algo"]
+            let rv = self._scrub_region(total, bs, algo)
+            return rv
 
         let ref_sb = read_superblock(reference_path)
         if dict_has(ref_sb, "error"):
