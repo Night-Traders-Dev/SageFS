@@ -6,6 +6,31 @@ let DedupEngine = dedup.DedupEngine
 var TESTS_RUN: Int = 0
 var TESTS_PASSED: Int = 0
 
+## Distinct, deterministic block contents, so two different n values never
+## collide and every fingerprint in the bloom tests is unique.
+proc block_pattern(n: Int) -> Bytes:
+    ## Spread `n` across all 16 bytes. An earlier version used
+    ## (n * 7 + i * 13) & 0xFF per byte, which repeats every 256 values of n,
+    ## so "absent" probe patterns collided with inserted ones and the bloom
+    ## filter's false-positive rate looked like 72% when the filter was fine.
+    let b: Bytes = bytes(16)
+    var v: Int = n
+    var i: Int = 0
+    while i < 16:
+        v = (v * 1103515245 + 12345) & 0x7FFFFFFF
+        b[i] = (v >> 16) & 0xFF
+        i = i + 1
+    return b
+
+## Contents derived from a label, for the shared-fingerprint case.
+proc bytes_pattern(label: String) -> Bytes:
+    let b: Bytes = bytes(16)
+    var i: Int = 0
+    while i < 16:
+        b[i] = ord(label[i % len(label)])
+        i = i + 1
+    return b
+
 proc check(name: String, got: Int, expected: Int):
     TESTS_RUN = TESTS_RUN + 1
     if got == expected:
@@ -124,6 +149,78 @@ proc test_get_stats():
     check("fingerprints", stats["fingerprint_count"], 2)
     check("blocks", stats["blocks_tracked"], 2)
 
+## --- Bloom filter ---------------------------------------------------------
+## The filter replaced an exact-match Dict of every fingerprint ever seen. These
+## cover the three properties that made that a problem: the filter is a fixed
+## number of bits, it never produces a false negative, and removing a block does
+## not make a still-shared fingerprint look absent.
+
+proc test_bloom_fixed_size():
+    let d = dedup.DedupEngine()
+    ## Fixed regardless of contents.
+    let before = bytes_len(d.bloom_filter)
+    var i = 0
+    while i < 500:
+        d.add_fingerprint(block_pattern(i), 1000 + i)
+        i = i + 1
+    check("bloom filter size is constant", bytes_len(d.bloom_filter) == before)
+    check("bloom size matches DEDUP_BLOOM_SIZE",
+          before * 8 == dedup.DEDUP_BLOOM_SIZE)
+
+proc test_bloom_no_false_negatives():
+    ## The one property that must never break: reporting a present block as
+    ## absent returns -1 and writes duplicate data, so this has to hold exactly.
+    let d = dedup.DedupEngine()
+    var i = 0
+    while i < 300:
+        let fp = d.compute_fingerprint(block_pattern(i))
+        d.add_fingerprint(block_pattern(i), 2000 + i)
+        if not d.bloom_test(fp):
+            check_bool("false negative at " + str(i), false)
+            return
+        i = i + 1
+    check_bool("no false negatives over 300 distinct blocks", true)
+
+proc test_bloom_shared_fingerprint_survives_removal():
+    ## Two blocks with identical content share one fingerprint. Removing one must
+    ## not clear the bit, or the other becomes a false negative.
+    let d = dedup.DedupEngine()
+    let payload = bytes_pattern("shared")
+    d.add_fingerprint(payload, 500)
+    d.add_fingerprint(payload, 501)
+    d.remove_block(501)
+    let hit = d.check_inline(payload)
+    check("shared fingerprint still found after sibling removed", hit, 500)
+
+proc test_bloom_false_positive_rate_bounded():
+    ## Absent fingerprints must not all read as present, or the pre-check is
+    ## worthless. Insert a modest load and confirm absent items mostly miss.
+    let d = dedup.DedupEngine()
+    var i = 0
+    while i < 200:
+        d.add_fingerprint(block_pattern(i), 3000 + i)
+        i = i + 1
+    var false_positives = 0
+    var probes = 0
+    while probes < 400:
+        let fp = d.compute_fingerprint(block_pattern(900000 + probes))
+        if d.bloom_test(fp):
+            false_positives = false_positives + 1
+        probes = probes + 1
+    ## Under 25% is a loose bound, but it catches a filter that is not filtering.
+    check_bool("false positive rate under 25%", false_positives * 4 < probes)
+
+proc test_bloom_stats():
+    let d = dedup.DedupEngine()
+    d.add_fingerprint(block_pattern(1), 10)
+    d.add_fingerprint(block_pattern(2), 11)
+    let st = d.get_stats()
+    ## dict_get_int lives in fuse.sage, which this test does not import; index
+    ## the dict directly instead.
+    check("stats report bloom bits", st["bloom_bits_total"],
+          dedup.DEDUP_BLOOM_SIZE)
+    check_bool("stats report bits set", st["bloom_bits_set"] > 0)
+
 proc main():
     print("=== SageFS Dedup Engine Tests ===")
     test_fingerprint()
@@ -132,6 +229,11 @@ proc main():
     test_remove_block()
     test_remove_nonexistent()
     test_get_stats()
+    test_bloom_fixed_size()
+    test_bloom_no_false_negatives()
+    test_bloom_shared_fingerprint_survives_removal()
+    test_bloom_false_positive_rate_bounded()
+    test_bloom_stats()
     print("")
     print("Results: " + str(TESTS_PASSED) + "/" + str(TESTS_RUN) + " passed")
     if TESTS_PASSED == TESTS_RUN:

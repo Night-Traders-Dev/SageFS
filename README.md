@@ -39,9 +39,10 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 28/28 files, 944 assertions in both the C backend and the bytecode VM, no known failures.** The suite was
-previously not running at all; see [Known issues](#known-issues) for what is
-still broken.
+**Tests: 33/33 files, 1077 assertions, all passing** under the bytecode VM
+(`./sagemake test`). The C backend compiles all 30 modules, but the assertion
+suite is run on the bytecode VM only, so a native regression would not be caught
+by it. See [Known issues](#known-issues) for what is still broken.
 
 ## Key Features
 
@@ -88,7 +89,7 @@ still broken.
 - ⚠️ **Deduplication** — fingerprinting and refcount tables exist, but
   `check_inline()` never increments a refcount and the fingerprint is a 32-bit
   polynomial hash, not SHA-256. Nothing is deduplicated.
-- ❌ **Bloom filter** — `bloom_filter` is a `Dict`; `DEDUP_BLOOM_SIZE` is unused
+- ✅ **Bloom filter** — `bloom_filter` is a fixed `DEDUP_BLOOM_SIZE`-bit array with 7 probes. A real filter, not an exact-set `Dict`, so its memory no longer grows with the image. It is safe here only because a hit is always confirmed against the exact fingerprint table before anything is deduped, so a false positive costs one lookup. Bits are never cleared on removal: clearing one would make a still-shared fingerprint look absent to every other block sharing it, which would be a false negative and therefore corruption.
 - ❌ **Reflink copies** — not implemented
 
 ### 🔐 Security
