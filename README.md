@@ -66,8 +66,17 @@ by it. See [Known issues](#known-issues) for what is still broken.
   `REC_UPDATE`, so the log is structurally present and semantically empty.
 - ⚠️ **Checkpoint packs** — structures and (de)serialisation exist; `mkfs` never
   writes them and nothing reads them back
-- ❌ **SHA-256** — implemented and verified against NIST vectors on the bytecode VM, but the C backend **segfaults** executing the function, so it is not enabled. The crash is non-monotonic in round count: 64 rounds runs clean, 63 segfaults, as do 48/56/60, while 40 does not. That rules out resource exhaustion and points at memory handling in the C backend for functions of this shape, so this is blocked on a codegen fix rather than on the algorithm. The stub returns the hard-coded digest of the empty string, so **every block currently hashes identically** and dedup cannot distinguish two different blocks.
-  string for any input
+  - ❌ **SHA-256** — not implemented. `sha256()` returns the hard-coded digest of
+    the empty string for every input, so **every block hashes identically** and
+    nothing can be deduplicated against it.
+
+    An implementation was written and verified against the NIST vectors under the
+    bytecode VM, then reverted: the C backend segfaulted executing it. That crash
+    was real, and diagnosing it is what found the `ffi.call` use-after-free now
+    fixed in the compiler — the emitted argument list freed itself before
+    `sage_ffi_call` read it. The SHA-256 code itself was never committed, so there
+    is nothing in the tree to re-verify and no partial work to salvage. The next
+    step is simply to write it again; it should now survive compilation.
 - ✅ **Online scrub** — `scrub.sage` verifies a volume block by block and reports
   **OK / DAMAGE / INCONCLUSIVE / ERROR**. It replaces a tool that built a fresh
   `ChecksumTree`, found nothing recorded in it, compared nothing, and then printed
