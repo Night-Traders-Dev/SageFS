@@ -148,7 +148,17 @@ class DedupEngine:
             self.fingerprints[fp] = block_addr
         let key = str(block_addr)
         self.block_to_fp[key] = fp
-        if not dict_has(self.reference_counts, key):
+        ## Increment, not just initialise.
+        ##
+        ## Registering a block once sets the count to 1; registering it *again* is
+        ## another file taking a reference to the same content, and the count has to
+        ## say so. Leaving it at 1 made every shared block look singly-referenced, so
+        ## the copy-on-write check never fired and an edit to one file overwrote the
+        ## block every other file was still reading -- silent corruption with no error
+        ## at the time. That is exactly the failure dedup must never have.
+        if dict_has(self.reference_counts, key):
+            self.reference_counts[key] = self.reference_counts[key] + 1
+        else:
             self.reference_counts[key] = 1
 
     proc remove_block(self, block_addr: Int):

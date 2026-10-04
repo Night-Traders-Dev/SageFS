@@ -310,6 +310,25 @@ proc test_bloom_filter_with_sha256_fingerprints():
     check_bool("every probe lands inside the filter", in_range)
 
 
+## Registering the same block twice means two files took a reference to it, and the
+## count has to say so. This used to leave it at 1, so every shared block looked
+## singly-referenced -- which is the condition copy-on-write needs to detect before
+## writing, so a wrong count here means a shared block gets overwritten in place.
+proc test_repeated_add_increments_refcount():
+    let d = DedupEngine()
+    let blk = bytes_pattern("counted")
+    d.add_fingerprint(blk, 500)
+    check("first registration counts one", d.ref_count(500), 1)
+    d.add_fingerprint(blk, 500)
+    check("re-registering the same block counts two", d.ref_count(500), 2)
+    d.add_fingerprint(blk, 500)
+    check("and three", d.ref_count(500), 3)
+    d.dec_ref(500)
+    check("a release drops it to two", d.ref_count(500), 2)
+    ## A different block holding different content starts its own count.
+    d.add_fingerprint(block_pattern(77), 501)
+    check("a different block is counted separately", d.ref_count(501), 1)
+
 proc main():
     print("=== SageFS Dedup Engine Tests ===")
     test_fingerprint()
@@ -318,6 +337,7 @@ proc main():
     test_bloom_filter_with_sha256_fingerprints()
     test_dedup_hit_miss()
     test_ref_counts()
+    test_repeated_add_increments_refcount()
     test_remove_block()
     test_remove_nonexistent()
     test_get_stats()
