@@ -135,19 +135,6 @@ proc format_device(dev: String, opts: Dict) -> Bool:
     ## carved off the end of the allocatable range cannot be handed out, whereas
     ## a region marked off inside it would eventually be allocated over -- and an
     ## overwritten checksum entry reads as "untracked", so the loss is silent.
-    ## Same arithmetic as csum.region_blocks_for(), inlined.
-    ##
-    ## Not a stylistic choice. Calling csum.region_blocks_for() here compiles and
-    ## links fine, but the resulting mkfs binary then fails imgio.truncate_to() --
-    ## the volume is left 33 KB and mkfs reports "could not size ... to 268435456
-    ## bytes". Bytecode mkfs with the identical source formats the volume correctly,
-    ## and a standalone program that imports csum, calls region_blocks_for(), and
-    ## then truncates works when compiled. So this is a whole-program defect in the
-    ## C backend, not a mistake in this call.
-    ##
-    ## Workaround until that is fixed: keep the formula here, and let
-    ## test_csum.sage assert it agrees with csum.region_blocks_for(), so the two
-    ## cannot drift apart unnoticed.
     let csum_blocks: Int = csum.region_blocks_for(image_blocks, block_size)
     let total_blocks: Int = image_blocks - csum_blocks
 
@@ -156,12 +143,6 @@ proc format_device(dev: String, opts: Dict) -> Bool:
         print "       (current: " + str(total_blocks / segment_size) + " segments)"
         return false
 
-    ## PROBE
-    sys.exec("rm -f /tmp/probe.img")
-    io.writebytes("/tmp/probe.img", bytes(33000))
-    print "  probe early truncate -> " + str(imgio.truncate_to("/tmp/probe.img", 268435456))
-    print "  probe size -> " + str(io.filesize("/tmp/probe.img"))
-    sys.exec("rm -f /tmp/probe.img")
     print "Formatting " + dev + " as SageFS..."
     ## Refuse before writing anything.
     ##

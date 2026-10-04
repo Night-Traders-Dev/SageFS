@@ -39,7 +39,7 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 37/37 files, 1214 assertions, all passing** under the bytecode VM
+**Tests: 37/37 files, 1212 assertions, all passing** under the bytecode VM
 (`./sagemake test`). A test file that asserts nothing is reported as a failure
 rather than passing silently. The C backend compiles all 32 modules, but the assertion
 suite is run on the bytecode VM only, so a native regression would not be caught

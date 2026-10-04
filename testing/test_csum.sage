@@ -192,28 +192,6 @@ proc test_slice_helper():
     check_eq("clamped slice length", bytes_len(csum.csum_slice(b, 6, 99)), 2)
     check_eq("inverted slice is empty", bytes_len(csum.csum_slice(b, 5, 2)), 0)
 
-## mkfs inlines region sizing rather than calling csum.region_blocks_for(),
-## because calling it makes the compiled mkfs binary fail truncate_to(). This
-## test is what stops the two copies drifting apart.
-proc test_mkfs_inline_matches():
-    var b: Int = 1
-    var all_ok: Bool = true
-    var cases: Int = 0
-    while b <= 16:
-        let blocks: Int = 1024 * b
-        ## The literal expression mkfs.sage uses.
-        let inline: Int = int((blocks * 4 + 4096 - 1) / 4096)
-        if inline != csum.region_blocks_for(blocks, 4096):
-            all_ok = false
-        cases = cases + 1
-        b = b + 1
-    check("mkfs inlined sizing matches csum.region_blocks_for", all_ok)
-    ## And the exact value mkfs uses for a 256 MiB volume.
-    let img_blocks: Int = 268435456 / 4096
-    let m: Int = int((img_blocks * 4 + 4096 - 1) / 4096)
-    check_eq("256 MiB volume reserves 64 region blocks",
-             m, csum.region_blocks_for(img_blocks, 4096))
-
 proc main():
     print("=== SageFS Checksum Region Tests ===")
     test_region_sizing()
@@ -229,7 +207,6 @@ proc main():
     test_load_tree()
     test_stats()
     test_slice_helper()
-    test_mkfs_inline_matches()
     print("")
     print("Results: " + str(TESTS_PASSED) + "/" + str(TESTS_RUN) + " passed")
     if TESTS_PASSED == TESTS_RUN:
