@@ -36,11 +36,28 @@ let DEDUP_BLOOM_SIZE: Int = 65536
 
 ## Number of hash probes per lookup. 7 is the usual optimum for a filter of this
 ## size and gives a false-positive rate near 1% at the expected load.
+## Fingerprint algorithms.
+##
+## The fast one is a 32-bit polynomial hash. The strong one is SHA-256.
+##
+## SHA-256 is not the default despite being available, because it costs about 16x
+## more per block in this runtime: measured at roughly 95 ms per 4096-byte block
+## against 6 ms for CRC32C, i.e. ~43 KiB/s versus ~670 KiB/s. Checksumming a
+## 1 GiB volume with SHA-256 would take hours. CRC32C catches the corruption this
+## actually needs to catch -- random bit rot -- and SHA-256 is there for callers
+## that want content addressing against an adversary.
+##
+## Same reasoning as btrfs: crc32c by default, sha256 as an opt-in paranoid mode.
+let DEDUP_FP_FAST: Int = 0
+let DEDUP_FP_SHA256: Int = 1
+
 let DEDUP_BLOOM_HASHES: Int = 7
 
 ## FNV-1a over a fingerprint string with a seed, to get one probe index.
 ## Two different seeds give two independent-enough hashes without needing a
 ## cryptographic digest here.
+import checksum
+
 proc bloom_hash(fp: String, seed: Int) -> Int:
     var h: Int = 2166136261 ^ seed
     let n: Int = len(fp)
@@ -62,6 +79,9 @@ class DedupEngine:
         self.hits = 0
         self.misses = 0
         self.total_deduped = 0
+        ## See DEDUP_FP_*. Namespaced into the fingerprint string so a table can
+        ## hold both kinds at once without a fast hash colliding with a digest.
+        self.fingerprint_algo = DEDUP_FP_FAST
 
     proc bloom_test(self, fp: String) -> Bool:
         ## True means "possibly present". False means definitely absent.
@@ -89,6 +109,13 @@ class DedupEngine:
         self.bloom_set_bits = self.bloom_set_bits + newly
 
     proc compute_fingerprint(self, data: Bytes) -> String:
+        ## Content address for a block.
+        ##
+        ## Prefixed by algorithm so fingerprints from different algorithms cannot
+        ## be confused in one table: a 32-bit polynomial hash and a truncated
+        ## digest could otherwise produce the same string.
+        if self.fingerprint_algo == DEDUP_FP_SHA256:
+            return "sha256:" + checksum.sha256(data)
         var h: Int = 0
         let n = bytes_len(data)
         for i in range(n):

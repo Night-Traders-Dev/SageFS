@@ -2,6 +2,9 @@
 
 import dedup
 let DedupEngine = dedup.DedupEngine
+let DEDUP_FP_FAST = dedup.DEDUP_FP_FAST
+let DEDUP_FP_SHA256 = dedup.DEDUP_FP_SHA256
+let DEDUP_BLOOM_SIZE = dedup.DEDUP_BLOOM_SIZE
 
 var TESTS_RUN: Int = 0
 var TESTS_PASSED: Int = 0
@@ -50,12 +53,12 @@ proc check_bool(name: String, got: Bool):
 proc test_fingerprint():
     print("compute_fingerprint:")
     let engine = DedupEngine()
-    var data = bytes("hello")
+    var data = ascii_of("hello")
     let fp = engine.compute_fingerprint(data)
     check_bool("fingerprint starts with fp_", len(fp) > 3)
     let fp2 = engine.compute_fingerprint(data)
     check("fingerprint deterministic", fp, fp2)
-    var data2 = bytes("world")
+    var data2 = ascii_of("world")
     let fp3 = engine.compute_fingerprint(data2)
     check_bool("different data -> different fp", fp != fp3)
 
@@ -179,7 +182,7 @@ proc test_bloom_no_false_negatives():
             check_bool("false negative at " + str(i), false)
             return
         i = i + 1
-    check_bool("no false negatives over 300 distinct blocks", true)
+    check_bool("no false negatives over 300 distinct blocks")
 
 proc test_bloom_shared_fingerprint_survives_removal():
     ## Two blocks with identical content share one fingerprint. Removing one must
@@ -221,9 +224,98 @@ proc test_bloom_stats():
           dedup.DEDUP_BLOOM_SIZE)
     check_bool("stats report bits set", st["bloom_bits_set"] > 0)
 
+## --- fingerprint algorithms ----------------------------------------------
+##
+## SHA-256 is opt-in rather than the default because it costs ~16x more per block
+## here (~95 ms vs ~6 ms for a 4096-byte block). These tests pin the behaviour of
+## both, and specifically that switching algorithm does not corrupt a table that
+## already holds the other kind of fingerprint.
+
+## bytes(String) is not a valid overload in this dialect -- it resolves against the
+## two-argument bytes(len, fill) and raises an arity error. Build the bytes here.
+proc ascii_of(s: String) -> Bytes:
+    let b: Bytes = bytes(len(s))
+    var i: Int = 0
+    while i < len(s):
+        bytes_set(b, i, ord(s[i]))
+        i = i + 1
+    return b
+
+proc test_fingerprint_algorithms():
+    let d = DedupEngine()
+    let data = ascii_of("hello")
+    ## Default is the fast hash.
+    check_bool("default is the fast hash", d.compute_fingerprint(data)[0:3] == "fp_")
+    d.fingerprint_algo = DEDUP_FP_SHA256
+    let fp = d.compute_fingerprint(data)
+    check_bool("sha256 mode is namespaced", fp[0:7] == "sha256:")
+    ## 7 prefix characters + 64 hex digits.
+    check("sha256 fingerprint length", len(fp), 71)
+    ## Known digests, so a wrong algorithm cannot pass by being self-consistent.
+    check_bool("sha256 of hello matches the published digest",
+               fp == "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+    check_bool("sha256 of world matches the published digest",
+               d.compute_fingerprint(ascii_of("world")) == "sha256:486ea46224d1bb4fb680f34f7c9ad96a8f24ec88be73ea8e5a6c65260e9cb8a7")
+    check_bool("sha256 fingerprints are deterministic", fp == d.compute_fingerprint(data))
+    ## One flipped bit must change the fingerprint, which a 32-bit hash would
+    ## eventually fail to do.
+    let b = bytes(64)
+    bytes_set(b, 30, 0x41)
+    let f1 = d.compute_fingerprint(b)
+    bytes_set(b, 30, 0x42)
+    check_bool("one flipped bit changes the sha256 fingerprint",
+               f1 != d.compute_fingerprint(b))
+
+proc test_fingerprint_algorithms_do_not_collide():
+    ## A fast hash and a digest for the same bytes must not be confusable, or a
+    ## table populated under one algorithm would report false hits under the other.
+    let d = DedupEngine()
+    let data = ascii_of("payload")
+    let fast = d.compute_fingerprint(data)
+    ## Insert while still on the fast hash, so the stored key is the fast name.
+    d.add_fingerprint(data, 7)
+    d.fingerprint_algo = DEDUP_FP_SHA256
+    let strong = d.compute_fingerprint(data)
+    check_bool("fast and sha256 fingerprints differ", fast != strong)
+    ## The sha256 lookup must miss: the stored entry is under the fast name, and
+    ## without the prefix a table could confuse the two.
+    check("sha256 lookup does not hit a fast-hash entry", d.check_inline(data), -1)
+    ## And the fast lookup must still find it, so switching did not evict.
+    d.fingerprint_algo = DEDUP_FP_FAST
+    check("fast lookup still hits its own entry", d.check_inline(data), 7)
+
+proc test_bloom_filter_with_sha256_fingerprints():
+    ## The Bloom filter hashes the fingerprint string, so a 71-character key is a
+    ## very different shape from the 11-character one. It must still never produce
+    ## a false negative, and every probe must land inside the filter.
+    let d = DedupEngine()
+    d.fingerprint_algo = DEDUP_FP_SHA256
+    var i: Int = 0
+    var no_false_negatives: Bool = true
+    var in_range: Bool = true
+    while i < 40:
+        let blk = block_pattern(i)
+        let fp = d.compute_fingerprint(blk)
+        d.add_fingerprint(blk, 100 + i)
+        if not d.bloom_test(fp):
+            no_false_negatives = false
+        var k: Int = 0
+        while k < 7:
+            let h = dedup.bloom_hash(fp, k)
+            if h < 0 or h >= DEDUP_BLOOM_SIZE:
+                in_range = false
+            k = k + 1
+        i = i + 1
+    check_bool("bloom has no false negatives for sha256 keys", no_false_negatives)
+    check_bool("every probe lands inside the filter", in_range)
+
+
 proc main():
     print("=== SageFS Dedup Engine Tests ===")
     test_fingerprint()
+    test_fingerprint_algorithms()
+    test_fingerprint_algorithms_do_not_collide()
+    test_bloom_filter_with_sha256_fingerprints()
     test_dedup_hit_miss()
     test_ref_counts()
     test_remove_block()

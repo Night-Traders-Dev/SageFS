@@ -39,7 +39,7 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 37/37 files, 1230 assertions, all passing** under the bytecode VM
+**Tests: 37/37 files, 1241 assertions, all passing** under the bytecode VM
 (`./sagemake test`). A test file that asserts nothing is reported as a failure
 rather than passing silently. The C backend compiles all 32 modules, but the assertion
 suite is run on the bytecode VM only, so a native regression would not be caught
@@ -140,9 +140,18 @@ by it. See [Known issues](#known-issues) for what is still broken.
 - ⚠️ **Transparent compression** — `compress.sage` picks an algorithm by
   temperature and tracks ratios, then writes a 3-byte header followed by the
   original bytes. No compression is performed.
-- ⚠️ **Deduplication** — fingerprinting and refcount tables exist, but
-  `check_inline()` never increments a refcount and the fingerprint is a 32-bit
-  polynomial hash, not SHA-256. Nothing is deduplicated.
+  - ⚠️ **Deduplication** — the engine is complete (Bloom pre-check, exact fingerprint
+    table, refcounts, shared-fingerprint handling) and **SHA-256 is now available as the
+    block fingerprint**, verified against the published digests. It is *not* the default:
+    `DEDUP_FP_FAST` (32-bit polynomial) stays default because SHA-256 costs ~16x more per
+    block in this runtime — measured ~95 ms vs ~6 ms for a 4096-byte block, i.e. ~43 KiB/s
+    against ~670 KiB/s — so whole-volume dedup on SHA-256 would take hours. Set
+    `DedupEngine.fingerprint_algo = DEDUP_FP_SHA256` for content addressing against an
+    adversary. Fingerprints are prefixed by algorithm, so a table can hold both without
+    confusing a fast hash with a digest.
+
+    Still **⚠️** because the engine is not wired into the read/write path:
+    `check_inline()` is never called during I/O, so nothing is deduplicated yet.
 - ✅ **Bloom filter** — `bloom_filter` is a fixed `DEDUP_BLOOM_SIZE`-bit array with 7 probes. A real filter, not an exact-set `Dict`, so its memory no longer grows with the image. It is safe here only because a hit is always confirmed against the exact fingerprint table before anything is deduped, so a false positive costs one lookup. Bits are never cleared on removal: clearing one would make a still-shared fingerprint look absent to every other block sharing it, which would be a false negative and therefore corruption.
 - ❌ **Reflink copies** — not implemented
 
