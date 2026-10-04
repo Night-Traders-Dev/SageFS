@@ -23,6 +23,7 @@
 import sys
 import io
 import superblock
+import csum
 import imgio
 
 proc usage() -> Int:
@@ -147,8 +148,7 @@ proc format_device(dev: String, opts: Dict) -> Bool:
     ## Workaround until that is fixed: keep the formula here, and let
     ## test_csum.sage assert it agrees with csum.region_blocks_for(), so the two
     ## cannot drift apart unnoticed.
-    let csum_entries: Int = image_blocks * 4
-    let csum_blocks: Int = int((csum_entries + block_size - 1) / block_size)
+    let csum_blocks: Int = csum.region_blocks_for(image_blocks, block_size)
     let total_blocks: Int = image_blocks - csum_blocks
 
     if total_blocks / segment_size < 64:
@@ -156,6 +156,12 @@ proc format_device(dev: String, opts: Dict) -> Bool:
         print "       (current: " + str(total_blocks / segment_size) + " segments)"
         return false
 
+    ## PROBE
+    sys.exec("rm -f /tmp/probe.img")
+    io.writebytes("/tmp/probe.img", bytes(33000))
+    print "  probe early truncate -> " + str(imgio.truncate_to("/tmp/probe.img", 268435456))
+    print "  probe size -> " + str(io.filesize("/tmp/probe.img"))
+    sys.exec("rm -f /tmp/probe.img")
     print "Formatting " + dev + " as SageFS..."
     ## Refuse before writing anything.
     ##

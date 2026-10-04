@@ -236,6 +236,18 @@ def cmd_test(args: list[str]) -> None:
             stderr = result.stderr or ""
             # Detect failures via exit code OR failure patterns in output
             has_fail = "FAIL" in stdout or "SOME TESTS FAILED" in stdout
+            # A test file that ran nothing still exits 0, so it used to count
+            # as a pass. That is how a whole file rots unnoticed: drop its
+            # main() call, or let an early return swallow everything, and the
+            # suite stays green while asserting nothing. Require evidence that
+            # the file actually asserted something.
+            asserted = ("PASS" in stdout or "FAIL" in stdout
+                        or "Results:" in stdout or "passed" in stdout)
+            if not asserted and not stderr.strip():
+                fail()
+                print("    no assertions ran -- this test file is inert")
+                total_fail += 1
+                continue
             if result.returncode != 0 or has_fail:
                 fail()
                 if stdout.strip():

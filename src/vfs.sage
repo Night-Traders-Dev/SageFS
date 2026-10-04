@@ -7,6 +7,7 @@
 
 import superblock
 import csum
+from checksum import checksum_block, CHECKSUM_NONE
 import segment as seg_module
 import nat as nat_module
 import allocator as alloc_module
@@ -81,6 +82,13 @@ class VFS:
         self.sb = nil
         ## Lazily built; nil means the volume has no checksum region.
         self.csum_region_cache = nil
+        ## Read-path integrity checking. Off by default because it hashes every
+        ## block read, which is the point of a filesystem without hardware
+        ## checksumming but is still not free.
+        self.verify_on_read = false
+        self.csum_errors = 0
+        self.csum_last_bad = -1
+        self.csum_last_reported = -1
         self.fds = []
         self.next_fd = 0
         self.image_buf = bytes()
@@ -154,7 +162,42 @@ class VFS:
         while i < bs:
             bytes_push(result, bytes_get(self.image_buf, offset + i))
             i = i + 1
+        ## Verify on the way out, so a corrupt block is caught by the read that
+        ## hits it rather than only by a later scrub.
+        ##
+        ## Silent here would be the worst outcome: the caller receives damaged
+        ## bytes with no indication, and the damage propagates into whatever it
+        ## was used for. The check is one block hash against an entry that was
+        ## written next to it, and it is skipped entirely for untracked blocks
+        ## and for volumes with no region, so it costs nothing where there is
+        ## nothing to check.
+        if not self.verify_on_read:
+            return result
+        let r = self._csum_region()
+        if r == nil:
+            return result
+        if blk_addr >= self.sb.csum_start_blk:
+            ## Never verify the region against its own entries.
+            return result
+        let expected: Int = r.get(blk_addr)
+        if expected == 0:
+            ## Untracked: nothing to compare against. Not an error.
+            return result
+        let actual: Int = checksum_block(result, self.sb.checksum_algo)
+        if actual != expected:
+            self.csum_errors = self.csum_errors + 1
+            self.csum_last_bad = blk_addr
+            ## Report once per bad block. A hot loop re-reading a damaged block
+            ## would otherwise flood stderr with the same message.
+            if self.csum_errors == 1 or blk_addr != self.csum_last_reported:
+                self.csum_last_reported = blk_addr
+                let msg: String = "VFS: checksum mismatch reading block " + str(blk_addr) + " (computed=" + str(actual) + " expected=" + str(expected) + ")"
+                print msg
         return result
+
+    ## csum_error_count — Number of blocks that failed verification this mount.
+    proc csum_error_count(self) -> Int:
+        return self.csum_errors
 
     proc _write_block(self, blk_addr: Int, data: Bytes):
         let bs = self._init_block_size()

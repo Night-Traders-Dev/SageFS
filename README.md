@@ -39,8 +39,9 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 36/36 files, 1204 assertions, all passing** under the bytecode VM
-(`./sagemake test`). The C backend compiles all 32 modules, but the assertion
+**Tests: 37/37 files, 1214 assertions, all passing** under the bytecode VM
+(`./sagemake test`). A test file that asserts nothing is reported as a failure
+rather than passing silently. The C backend compiles all 32 modules, but the assertion
 suite is run on the bytecode VM only, so a native regression would not be caught
 by it. See [Known issues](#known-issues) for what is still broken.
 
@@ -85,8 +86,13 @@ by it. See [Known issues](#known-issues) for what is still broken.
   range, so adding it shifted no existing absolute block number, and `total_blocks`
   excludes it so no allocator can ever hand it out.
 
-  **Not yet:** checksums are recorded but not yet verified on the read path, so a
-  corrupt block is found by `scrub`, not by the read that hits it.
+  `VFS._read_block()` also verifies each block against its entry on the way out,
+  so corruption is caught by the read that hits it rather than only by a scrub you
+  have to remember to run. It is **off by default** (`VFS.verify_on_read`) because
+  it hashes every block read; untracked blocks and volumes with no region are
+  skipped, and region blocks are never verified against their own entries. A
+  mismatch is reported once per bad block and counted via
+  `VFS.csum_error_count()`.
   built empty tree, so it can never detect a mismatch
 - ✅ **Repair-on-read** — `Raid5Array` in `raid.sage` is a byte-level RAID5 over real
   devices or image files. A lost block is rebuilt by XOR-ing the survivors with the
