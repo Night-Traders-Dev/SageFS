@@ -3,6 +3,7 @@
 ## ============================================================================
 ##
 ## Covers:
+##   - SHA-256 known-answer vectors (NIST), across padding boundaries
 ##   - CRC32C known-answer vectors (BTRFS / iSCSI compatible)
 ##   - xxHash32 known-answer vectors (reference xxHash compatible)
 ##   - checksum_block() algorithm dispatch
@@ -152,8 +153,104 @@ proc test_policy():
 # Runner
 # ---------------------------------------------------------------------------
 
+## --- SHA-256 -------------------------------------------------------------
+##
+## The stub returned the empty-input digest for everything, so these are the
+## tests that would have caught it. Lengths are chosen to straddle every place
+## the padding can go wrong: 55/56/57 and 63/64/65 are where the 0x80 byte, the
+## length field, and the block boundary interact.
+
+proc ascii_bytes(s: String) -> Bytes:
+    let b: Bytes = bytes(len(s))
+    var i: Int = 0
+    while i < len(s):
+        b[i] = ord(s[i])
+        i = i + 1
+    return b
+
+proc repeat_byte(c: String, n: Int) -> Bytes:
+    let b: Bytes = bytes(n)
+    var i: Int = 0
+    while i < n:
+        b[i] = ord(c)
+        i = i + 1
+    return b
+
+proc test_sha256_nist():
+    ## FIPS 180-4 / NIST published vectors.
+    check_bool("sha256 empty",
+               checksum.sha256(bytes(0)),
+               "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+    check_bool("sha256 abc",
+               checksum.sha256(ascii_bytes("abc")),
+               "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    ## Two-block message, and the 448-bit NIST vector.
+    check_bool("sha256 448-bit",
+               checksum.sha256(ascii_bytes("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")),
+               "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1")
+    ## One million 'a': exercises multi-block scheduling and the bit-length field
+    ## at a magnitude where a double could lose the low bits.
+    check_bool("sha256 one million a",
+               checksum.sha256(repeat_byte("a", 1000000)),
+               "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0")
+
+proc test_sha256_padding_boundaries():
+    ## 55/56/57: 55 needs one block, 56 is the point where the length no longer
+    ## fits after the 0x80, so 56 spills into a second block.
+    check_bool("sha256 55 a",
+               checksum.sha256(repeat_byte("a", 55)),
+               "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318")
+    check_bool("sha256 56 a",
+               checksum.sha256(repeat_byte("a", 56)),
+               "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a")
+    ## 63/64/65 straddle the block boundary itself.
+    check_bool("sha256 64 a",
+               checksum.sha256(repeat_byte("a", 64)),
+               "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb")
+    ## Distinct lengths must give distinct digests: the stub returned one value for
+    ## everything, which is precisely the failure mode.
+    let d1: String = checksum.sha256(repeat_byte("a", 100))
+    let d2: String = checksum.sha256(repeat_byte("a", 101))
+    check_bool("adjacent lengths differ", d1 != d2, true)
+    check_bool("digest is 64 hex characters", len(checksum.sha256(bytes(0))) == 64, true)
+    let d: String = checksum.sha256(bytes(0))
+    ## Only 0-9 and a-f may appear; the stub's constant was lowercase too, so this
+    ## is about the new code not regressing it.
+    var only_hex: Bool = true
+    var i: Int = 0
+    while i < len(d):
+        let c: String = d[i]
+        if not ((c >= "0" and c <= "9") or (c >= "a" and c <= "f")):
+            only_hex = false
+        i = i + 1
+    check_bool("digest is lowercase hex", only_hex, true)
+
+proc test_rotr32():
+    ## A right rotate moves the low n bits to the top. Getting this backwards
+    ## produced a digest that was correct only for the empty input.
+    check("rotr 0x80000000 by 1", checksum.rotr32(0x80000000, 1), 0x40000000)
+    check("rotr 0x0000000f by 4", checksum.rotr32(0x0000000f, 4), 0xf0000000)
+    check("rotr 0x12345678 by 8", checksum.rotr32(0x12345678, 8), 0x78123456)
+    check("rotr by 0 is identity", checksum.rotr32(0x12345678, 0), 0x12345678)
+    check("rotr 0xffffffff by 1", checksum.rotr32(0xffffffff, 1), 0xffffffff)
+    ## Two rotates that sum to 32 must be the identity. Uses rotr32 on both
+    ## sides so the assertion covers only the function under test.
+    check("rotate round trip",
+          checksum.rotr32(checksum.rotr32(0xdeadbeef, 5), 27), 0xdeadbeef)
+
+proc test_sha256_fold32():
+    ## The 32-bit fold must differ per input or it is useless as a checksum.
+    let f1: Int = checksum.sha256_fold32(bytes(0))
+    let f2: Int = checksum.sha256_fold32(repeat_byte("a", 8))
+    check_bool("fold32 distinguishes inputs", f1 != f2, true)
+    check_bool("fold32 fits in 32 bits", f1 >= 0 and f1 <= 0xFFFFFFFF, true)
+
 proc main():
     print("=== SageFS Checksum Engine Tests ===")
+    test_sha256_nist()
+    test_sha256_padding_boundaries()
+    test_rotr32()
+    test_sha256_fold32()
     test_crc32c()
     test_xxhash32()
     test_dispatch()

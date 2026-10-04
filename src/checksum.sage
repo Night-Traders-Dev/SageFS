@@ -232,10 +232,140 @@ proc xxhash32(data: Bytes, seed: Int) -> Int:
 # A proper native implementation should be wired in at the VM level.
 # ---------------------------------------------------------------------------
 
+proc rotr32(x: Int, n: Int) -> Int:
+    ## Rotate a 32-bit word right by n bits, staying inside 32 bits throughout.
+    ##
+    ## The obvious form, (x >> n) | (x << (32 - n)), overflows a double: x is
+    ## nearly 2^32 and the shift adds up to 31, so the intermediate reaches 2^63
+    ## and a 53-bit significand silently rounds away the low bits -- which are
+    ## exactly the bits being rotated into the high half. Masking before the shift
+    ## keeps every intermediate under 2^32, so the OR is exact before the final
+    ## mask.
+    let v: Int = x & MASK32
+    if n == 0:
+        return v
+    ## A right rotate moves x's low n bits to the top and its high (32 - n) bits
+    ## down by n. Masking to n bits before shifting keeps the shifted term under
+    ## 2^32, so nothing is rounded on the way.
+    let low_mask: Int = (1 << n) - 1
+    let lo: Int = v & low_mask
+    return ((v >> n) | (lo << (32 - n))) & MASK32
+
 proc sha256(data: Bytes) -> String:
-    ## Placeholder — returns SHA-256 of empty input regardless of `data`.
-    let digest: String = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    return digest
+    ## SHA-256 of `data`, as 64 lowercase hex characters.
+    ##
+    ## Sage numbers are IEEE doubles with a 53-bit significand, so every
+    ## intermediate here is masked to 32 bits. The widest sum is five masked words,
+    ## under 2^35, still exactly representable.
+    let K: Array[Int] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+        0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+        0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+        0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+        0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2]
+
+    var H: Array[Int] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
+
+    let n: Int = bytes_len(data)
+    let bitlen: Int = n * 8
+    ## Pad: 0x80, zeros to 56 mod 64, then the length as 8 big-endian bytes.
+    var total: Int = n + 1
+    while (total % 64) != 56:
+        total = total + 1
+    total = total + 8
+    var msg: Bytes = bytes(total)
+    var i: Int = 0
+    while i < n:
+        msg[i] = data[i]
+        i = i + 1
+    msg[n] = 0x80
+    var lb: Int = 7
+    while lb >= 0:
+        ## bitlen < 2^53 for any input this runtime can hold, so the shifts are
+        ## exact even before masking.
+        msg[total - 1 - lb] = (bitlen >> (lb * 8)) & 0xFF
+        lb = lb - 1
+
+    var block: Int = 0
+    while block * 64 < total:
+        ## Message schedule: 16 words read big-endian from the block, then expanded
+        ## in place to 64.
+        var w: Array[Int] = []
+        var t: Int = 0
+        while t < 16:
+            let p: Int = block * 64 + t * 4
+            push(w, (msg[p] << 24) | (msg[p + 1] << 16) | (msg[p + 2] << 8) | msg[p + 3])
+            t = t + 1
+        t = 16
+        while t < 64:
+            let v15: Int = w[t - 15]
+            let v2: Int = w[t - 2]
+            let s0: Int = rotr32(v15, 7) ^ rotr32(v15, 18) ^ (v15 >> 3)
+            let s1: Int = rotr32(v2, 17) ^ rotr32(v2, 19) ^ (v2 >> 10)
+            push(w, (w[t - 16] + s0 + w[t - 7] + s1) & MASK32)
+            t = t + 1
+
+        var a: Int = H[0]
+        var b: Int = H[1]
+        var c: Int = H[2]
+        var d: Int = H[3]
+        var e: Int = H[4]
+        var f: Int = H[5]
+        var g: Int = H[6]
+        var h: Int = H[7]
+
+        t = 0
+        while t < 64:
+            let S1: Int = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25)
+            let ch: Int = (e & f) ^ ((MASK32 ^ e) & g)
+            let t1: Int = (h + S1 + ch + K[t] + w[t]) & MASK32
+            let S0: Int = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22)
+            let maj: Int = (a & b) ^ (a & c) ^ (b & c)
+            let t2: Int = (S0 + maj) & MASK32
+            h = g
+            g = f
+            f = e
+            e = (d + t1) & MASK32
+            d = c
+            c = b
+            b = a
+            a = (t1 + t2) & MASK32
+            t = t + 1
+
+        H[0] = (H[0] + a) & MASK32
+        H[1] = (H[1] + b) & MASK32
+        H[2] = (H[2] + c) & MASK32
+        H[3] = (H[3] + d) & MASK32
+        H[4] = (H[4] + e) & MASK32
+        H[5] = (H[5] + f) & MASK32
+        H[6] = (H[6] + g) & MASK32
+        H[7] = (H[7] + h) & MASK32
+        block = block + 1
+
+    let HEX: String = "0123456789abcdef"
+    var out: String = ""
+    var wi: Int = 0
+    while wi < 8:
+        let word: Int = H[wi]
+        ## Eight hex digits per 32-bit state word, most significant nibble first.
+        ## Stepping by 4 bits rather than 8 matters: shifting a 32-bit word by 32 or
+        ## more always yields zero, so a byte-stepped loop silently emits a 128-bit
+        ## digest with the top half of every word zero.
+        var pos: Int = 7
+        while pos >= 0:
+            let nyb: Int = (word >> (pos * 4)) & 0xF
+            out = out + HEX[nyb:nyb + 1]
+            pos = pos - 1
+        wi = wi + 1
+    return out
 
 proc sha256_hex(data: Bytes) -> String:
     ## Full 256-bit SHA-256 digest as a 64-character lowercase hex string.

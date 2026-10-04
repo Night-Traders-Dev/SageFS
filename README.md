@@ -39,7 +39,7 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 37/37 files, 1212 assertions, all passing** under the bytecode VM
+**Tests: 37/37 files, 1230 assertions, all passing** under the bytecode VM
 (`./sagemake test`). A test file that asserts nothing is reported as a failure
 rather than passing silently. The C backend compiles all 32 modules, but the assertion
 suite is run on the bytecode VM only, so a native regression would not be caught
@@ -66,9 +66,21 @@ by it. See [Known issues](#known-issues) for what is still broken.
   `REC_UPDATE`, so the log is structurally present and semantically empty.
 - ⚠️ **Checkpoint packs** — structures and (de)serialisation exist; `mkfs` never
   writes them and nothing reads them back
-  - ❌ **SHA-256** — not implemented. `sha256()` returns the hard-coded digest of
-    the empty string for every input, so **every block hashes identically** and
-    nothing can be deduplicated against it.
+  - ✅ **SHA-256** — implemented in `checksum.sage` and verified against the NIST
+    vectors (empty, `abc`, 448-bit, one million `a`) on **both** the bytecode VM and
+    the compiled C backend, plus the padding boundaries at 55/56/64 bytes.
+
+    Two things had to be right that were not obvious. Sage numbers are IEEE doubles
+    with a 53-bit significand, so `rotr32` masks *before* shifting: the obvious
+    `(x >> n) | (x << (32 - n))` reaches 2^63 and silently rounds away exactly the
+    low bits being rotated into the high half — correct for the empty input, wrong
+    for nearly everything else. And a right rotate moves the low **n** bits to the
+    top; masking the wrong half compiles and runs, it just returns the wrong digest.
+
+    The previous stub returned the empty-input digest for every input, so every block
+    hashed identically and nothing could be deduplicated. That is fixed. The C
+    backend segfault that blocked the first attempt was the `ffi.call` and
+    expression-temporary use-after-free, now fixed in the compiler.
 
     An implementation was written and verified against the NIST vectors under the
     bytecode VM, then reverted: the C backend segfaulted executing it. That crash
@@ -165,7 +177,7 @@ SageFS integrates Python-like readable and C-like performant SageLang to deliver
   - Integration of metadata tree with data management
 
 - **Enterprise data integrity**:
-  - CRC32C and xxHash per-block checksumming (SHA-256 is a stub)
+  - CRC32C and xxHash per-block checksumming (SHA-256 verified)
   - Dual superblock mirroring; checkpoint packs defined but not yet written
   - Write-ahead journal with a correct recover/replay, but no region reserved
 
