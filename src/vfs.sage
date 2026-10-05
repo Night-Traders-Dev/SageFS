@@ -199,12 +199,22 @@ class VFS:
     proc csum_error_count(self) -> Int:
         return self.csum_errors
 
-    proc _write_block(self, blk_addr: Int, data: Bytes):
+    proc _write_block(self, blk_addr: Int, data: Bytes, off_in_block: Int = 0):
+        ## Write `data` into a block, starting `off_in_block` bytes into it.
+        ##
+        ## The offset matters for any partial write landing mid-block. A 16-byte patch
+        ## at file offset 5000 belongs to bytes 904..919 of that block, not 0..15 --
+        ## and writing it at 0 overwrote the start of the block instead. Nothing
+        ## reported an error: the file kept its length and read back plausible data
+        ## with its first 16 bytes clobbered and the patch nowhere in it. Found while
+        ## testing dedup's copy-on-write, which needs this because it copies a block
+        ## and then writes into the middle of the copy.
         let bs = self._init_block_size()
-        let offset = blk_addr * bs
-        self._ensure_image_size(offset + bs)
+        let block_off = blk_addr * bs
+        let offset = block_off + off_in_block
+        self._ensure_image_size(offset + bytes_len(data))
         var i = 0
-        while i < bs and i < bytes_len(data):
+        while i < bytes_len(data) and off_in_block + i < bs:
             bytes_set(self.image_buf, offset + i, bytes_get(data, i))
             i = i + 1
         ## Record the checksum after the bytes are in place, from the buffer
@@ -1234,7 +1244,11 @@ class VFS:
                 while c < chunk_len:
                     bytes_push(chunk, bytes_get(data, placed + c))
                     c = c + 1
-                self._write_block(phys_blk, chunk)
+                ## Where in the block this chunk belongs, not always the start.
+                var chunk_off: Int = 0
+                if existing != nil:
+                    chunk_off = (target_off - existing.file_offset) % bs
+                self._write_block(phys_blk, chunk, chunk_off)
                 ## Only a freshly allocated block needs an extent. Writing in
                 ## place leaves the existing extent, which still describes the
                 ## whole block correctly -- re-inserting it with this chunk's

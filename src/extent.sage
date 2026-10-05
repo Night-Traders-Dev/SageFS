@@ -221,7 +221,15 @@ class ExtentTree:
 
     ## Insert an extent, merging with physically and logically
     ## adjacent extents where possible.
-    proc insert_extent(self, ino: Int, file_offset: Int, block_addr: Int, length: Int):
+    proc insert_extent(self, ino: Int, file_offset: Int, block_addr: Int, length: Int,
+                        allow_merge: Bool = true):
+        ## allow_merge=false keeps one block per record, which is what deduplication
+        ## needs. An extent normally describes a *run*: length bytes from block_addr
+        ## map to consecutive physical blocks. That holds only while the file owns
+        ## those blocks. A shared block sits wherever the first copy of that content
+        ## landed, so a run through it points at whatever happens to follow -- another
+        ## file's data. Callers that may share pass false and get single-block
+        ## extents, at the cost of a record per block.
         if length <= 0:
             return
         if length > MAX_EXTENT_LEN:
@@ -230,6 +238,15 @@ class ExtentTree:
         # Delete any existing extent at the exact file_offset
         let existing_key = self._key(ino, file_offset)
         self.btree.delete(existing_key)
+
+        # Merging is what turns adjacent single-block extents back into a run, and
+        # a run through a shared block points at whatever follows it in the
+        # allocator. Callers that may share pass allow_merge=false and store the
+        # record as-is, one block at a time.
+        if not allow_merge:
+            let plain = Extent(file_offset, block_addr, length)
+            self.btree.insert(self._key(ino, file_offset), plain.serialize())
+            return true
 
         # Find and try left merge
         var merge_left = false
