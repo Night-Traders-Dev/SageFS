@@ -196,11 +196,16 @@ proc slice_bytes(buf: Bytes, start: Int, end: Int) -> Bytes:
         b = n
     if b <= a:
         return bytes()
-    var out: Bytes = bytes(b - a)
-    var i: Int = 0
-    while i < b - a:
-        out[i] = buf[a + i]
-        i = i + 1
+    ## One memmove rather than a per-byte loop.
+    ##
+    ## Slicing a 256 MiB image was 268 million interpreted index assignments, which
+    ## is what produced the ten million "Invalid index assignment" lines and the
+    ## iteration-ceiling abort: mounting a volume mkfs had just created walked this
+    ## loop once per byte and never finished. It also used `out[i] = buf[a + i]`,
+    ## which is not the bytes_set() form, so the write was a generic index
+    ## assignment on a Bytes.
+    let out: Bytes = bytes(b - a)
+    bytes_copy_range(out, 0, buf, a, b - a)
     return out
 
 ## read_at — Read `size` bytes from `offset` into a new Bytes.
