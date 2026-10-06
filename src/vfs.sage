@@ -147,12 +147,13 @@ class VFS:
         return DEFAULT_SEGMENT_SIZE
 
     proc _ensure_image_size(self, needed_bytes: Int):
-        let current = bytes_len(self.image_buf)
-        if needed_bytes > current:
-            var i = current
-            while i < needed_bytes:
-                bytes_push(self.image_buf, 0)
-                i = i + 1
+        ## One resize instead of a bytes_push per byte. Growing the image buffer
+        ## this way made every write O(size), so a volume that needed to grow at
+        ## all paid for the whole buffer in interpreted calls -- and it grew one
+        ## byte at a time, which is also what made it quadratic over repeated
+        ## growth.
+        if needed_bytes > bytes_len(self.image_buf):
+            bytes_resize(self.image_buf, needed_bytes)
 
     ## _is_shared — Whether a logical block's content is held by more than one file.
     proc _is_shared(self, blk_addr: Int) -> Bool:
@@ -194,11 +195,18 @@ class VFS:
         let offset = blk_addr * bs
         let needed = offset + bs
         self._ensure_image_size(needed)
-        let result = bytes()
-        var i = 0
-        while i < bs:
-            bytes_push(result, bytes_get(self.image_buf, offset + i))
-            i = i + 1
+        ## One slice, not bs pairs of bytes_get/bytes_push. A block read is the
+        ## single most frequent operation in the filesystem, and the loop made it
+        ## 4096 interpreted calls per block: 200 block writes plus one read took
+        ## 2.9s, about 280 KiB/s. bytes_slice() is a single memcpy.
+        ## One memmove into a fresh buffer, not bytes_slice(). bytes_slice() returns
+        ## a view that aliases the source buffer, and image_buf is reallocated
+        ## whenever the volume grows, so a slice handed to a caller can be left
+        ## pointing at freed memory -- which is what segfaulted the compiled dedup
+        ## path, where _cow_block() holds a block across a write that grows the
+        ## image. Copying into a buffer we own costs one memcpy and cannot dangle.
+        let result = bytes(bs)
+        bytes_copy_range(result, 0, self.image_buf, offset, bs)
         ## Verify on the way out, so a corrupt block is caught by the read that
         ## hits it rather than only by a later scrub.
         ##
@@ -250,10 +258,16 @@ class VFS:
         let block_off = blk_addr * bs
         let offset = block_off + off_in_block
         self._ensure_image_size(offset + bytes_len(data))
-        var i = 0
-        while i < bytes_len(data) and off_in_block + i < bs:
-            bytes_set(self.image_buf, offset + i, bytes_get(data, i))
-            i = i + 1
+        ## One memmove instead of a per-byte set loop, for the same reason as the
+        ## read path. The `off_in_block + i < bs` cap the loop carried is kept as
+        ## an explicit clamp: a write that would run past the end of the block was
+        ## silently truncated, and bytes_copy_range() is bounds-checked, so passing
+        ## the clamped length preserves that behaviour exactly.
+        var n = bytes_len(data)
+        if off_in_block + n > bs:
+            n = bs - off_in_block
+        if n > 0:
+            bytes_copy_range(self.image_buf, offset, data, 0, n)
         ## Record the checksum after the bytes are in place, from the buffer
         ## rather than from `data`.
         ##
