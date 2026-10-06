@@ -21,6 +21,7 @@
 ## The FULL filesystem source tree (all components) is compiled separately by
 ## sagemake via src/all.sage, proving every module builds.
 import sys
+import cli_args
 import io
 import superblock
 import csum
@@ -305,4 +306,4 @@ proc main(args: Array):
         return
     format_device(opts["device"], opts)
 
-main(sys.args())
+main(cli_args.program_args(sys.args()))

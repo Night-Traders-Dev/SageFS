@@ -47,6 +47,35 @@ proc read_image(path: String) -> Bytes:
     if bytes_len(data) > 0:
         return data
     if not _is_block_device(path):
+        ## io.readbytes() refuses a whole-file read over 100 MiB and returns nil
+        ## rather than an error, so any image larger than that came back empty with
+        ## nothing logged. read_image_range() was written for exactly this and
+        ## used it, while read_image() -- the function every mount goes through --
+        ## kept the whole-file read and no fallback. A 256 MiB volume formatted by
+        ## mkfs therefore could not be reopened: read_image returned 0 bytes and
+        ## mount reported a corrupt superblock for a perfectly good image.
+        ##
+        ## Reassemble it from bounded ranges instead. The chunk is well under the
+        ## cap, so each read succeeds on its own.
+        let out: Bytes = bytes()
+        var offset: Int = 0
+        var empty_reads: Int = 0
+        while empty_reads < 2:
+            let piece = fileio.read_at(path, offset, BDEV_READ_SIZE)
+            if bytes_len(piece) <= 0:
+                empty_reads = empty_reads + 1
+                if empty_reads >= 2:
+                    break
+                offset = offset + BDEV_READ_SIZE
+                continue
+            empty_reads = 0
+            var i = 0
+            while i < bytes_len(piece):
+                bytes_push(out, bytes_get(piece, i))
+                i = i + 1
+            offset = offset + bytes_len(piece)
+        if bytes_len(out) > 0:
+            return out
         return data
     let tmp: String = "/tmp/sagefs_bdev_read.bin"
     let cmd: String = "/tmp/bdev_io read " + path + " 0 " + str(BDEV_READ_SIZE) + " " + tmp

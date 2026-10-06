@@ -1,4 +1,5 @@
 import sys
+import cli_args
 from snapshot import SnapshotEngine
 
 proc cmd_create(engine: SnapshotEngine, subvol: String, snap: String) -> Bool:
@@ -27,7 +28,7 @@ proc cmd_list(engine: SnapshotEngine, subvol: String):
         print "  " + s.name + "  root_block=" + str(s.root_block) + "  created=" + str(s.creation_time)
 
 proc main(args: Array):
-    if len(args) < 2:
+    if len(args) < 1:
         print "Usage: snapshot_cli.sage <command> [args]"
         print "Commands:"
         print "  create <subvol> <snap>   Create a snapshot"
@@ -35,14 +36,14 @@ proc main(args: Array):
         print "  list <subvol>            List snapshots for a subvolume"
         return
     let engine = SnapshotEngine()
-    let cmd = args[1]
-    if cmd == "create" and len(args) >= 4:
-        cmd_create(engine, args[2], args[3])
-    elif cmd == "delete" and len(args) >= 4:
-        cmd_delete(engine, args[2], args[3])
-    elif cmd == "list" and len(args) >= 3:
-        cmd_list(engine, args[2])
+    let cmd = args[0]
+    if cmd == "create" and len(args) >= 3:
+        cmd_create(engine, args[1], args[2])
+    elif cmd == "delete" and len(args) >= 3:
+        cmd_delete(engine, args[1], args[2])
+    elif cmd == "list" and len(args) >= 2:
+        cmd_list(engine, args[1])
     else:
         print "Unknown command or missing arguments"
 
-main(sys.args())
+main(cli_args.program_args(sys.args()))

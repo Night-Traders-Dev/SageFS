@@ -1,13 +1,17 @@
 import sys
+import cli_args
 import vfs as vfs_module
 from extent import ExtentTree, Extent
 
 proc main(args: Array):
-    if len(args) < 3:
+    ## Two positional arguments, so two are required and they start at 0.
+    ## This asked for three and read from index 1, so it refused to run unless
+    ## given an extra argument and then defragmented the wrong one.
+    if len(args) < 2:
         print "Usage: defrag_cli.sage <image> <inode>"
         return
-    let image_path = args[1]
-    let ino = tonumber(args[2])
+    let image_path = args[0]
+    let ino = tonumber(args[1])
     if ino < 0:
         print "Invalid inode number"
         return
@@ -52,4 +56,4 @@ proc main(args: Array):
         print "  No defragmentation needed (single extent)"
     fs.unmount()
 
-main(sys.args())
+main(cli_args.program_args(sys.args()))

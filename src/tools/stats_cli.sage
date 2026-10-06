@@ -1,11 +1,14 @@
 import sys
+import cli_args
 import vfs as vfs_module
 
 proc main(args: Array):
-    if len(args) < 2:
+    ## One positional argument, read from index 0. This required two and read
+    ## index 1, so it could only be run by passing something harmless first.
+    if len(args) < 1:
         print "Usage: stats_cli.sage <image>"
         return
-    let image_path = args[1]
+    let image_path = args[0]
     let fs = vfs_module.VFS(image_path, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
     if not fs.mount():
         print "Failed to mount image '" + image_path + "'"
@@ -118,4 +121,4 @@ proc main(args: Array):
         print "  Storage eff:      " + str(raid_info["storage_efficiency"])
     fs.unmount()
 
-main(sys.args())
+main(cli_args.program_args(sys.args()))
