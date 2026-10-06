@@ -17,6 +17,7 @@
 ##   Otherwise, it falls back to the Python FUSE bridge.
 
 import sys
+import cli_args
 import imgio
 import superblock
 import segment as seg_module
@@ -47,25 +48,14 @@ import fuse
 ## subsystem, replays the journal, detects and cleans orphan inodes,
 ## and returns a fully-wired vfs.VFS instance.
 proc main():
-    ## sys.args() begins with the launcher's own tokens, and the launcher eats
-    ## "-I" but leaves the include path behind as a bare argument. Indexing from
-    ## 1 therefore took "src" as the image, and the failure surfaced as a bad
-    ## superblock magic on a file that was never opened.
-    let all: Array[String] = sys.args()
-    let args: Array[String] = []
-    var i: Int = 0
-    while i < len(all):
-        let a: String = all[i]
-        if a == "src" or a == "." or a == "./src":
-            i = i + 1
-            continue
-        if len(a) >= 5 and a[len(a) - 5:len(a)] == ".sage":
-            i = i + 1
-            continue
-        push(args, a)
-        i = i + 1
+    ## Take the program's own arguments rather than indexing sys.args()
+    ## directly: argv[0] is the interpreter interpreted and the binary
+    ## compiled, and neither is a program argument. This filter used to drop
+    ## only the "src" and .sage leftovers, which left argv[0] in place -- so
+    ## once compiled binaries reported it, mount.sage took the binary path as
+    ## the device and failed on a superblock magic for a file it never opened.
+    let args: Array[String] = cli_args.program_args(sys.args())
 
-    ## args is now exactly the program's own arguments, so they start at 0.
     if len(args) < 2:
         print("Usage: mount.sage <image> <mountpoint>")
         return

@@ -14,13 +14,16 @@
 ## through tee, where $? reports tee's status rather than this process's.
 ## Library callers should use Scrubber.scrub() -> ScrubResult.verdict instead.
 ##
-## sys.args() does NOT include the program name, so the image is args[0]. The
-## previous version read args[1] while requiring two or more arguments, which
-## meant it scrubbed the *second* path and refused to run at all with a single
-## one -- the tool had never actually been exercised.
+## Arguments come from cli_args.program_args(), not from sys.args() directly:
+## sys.args() has a different shape interpreted and compiled, and the previous
+## version read args[0] as the image, which only worked while compiled code
+## omitted argv[0]. The earlier attempt before that read args[1] while requiring
+## two arguments, so it scrubbed the *second* path and refused to run with a
+## single one -- the tool had never actually been exercised.
 
 import sys
 import scrub
+import cli_args
 
 proc main(args: Array):
     if len(args) < 1:
@@ -80,4 +83,4 @@ proc main(args: Array):
         print "SCRUB VERDICT: ERROR"
     sys.exit(r.verdict)
 
-main(sys.args())
+main(cli_args.program_args(sys.args()))

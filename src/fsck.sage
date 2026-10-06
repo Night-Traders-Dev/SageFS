@@ -51,6 +51,7 @@ let ISSUE_BLOCK_CHECKSUM: Int = 7     # data/metadata block checksum mismatch
 # ===========================================================================
 
 import sys
+import cli_args
 import superblock
 import fsimage
 import dir as dir_module
@@ -354,11 +355,12 @@ class Fsck:
 ## script or an initramfs check.
 
 proc main():
-    ## Read sys.args() with an explicit type, as mount.sage does; passing it
+    ## program_args() drops argv[0] and the interpreter's include directory and
+    ## script path, so the volume is located the same way interpreted and compiled.
+    ## The result is read with an explicit type, as mount.sage does; passing it
     ## through an untyped parameter loses the element type and the runtime then
     ## refuses to iterate it.
-    let args: Array[String] = sys.args()
-    ## Drop argv[0] so the first user argument is not the script path.
+    let args: Array[String] = cli_args.program_args(sys.args())
 
     ## Note: this runtime does not implement sys.exit() -- calling it returns
     ## control to the next statement, so an earlier version of this function

@@ -39,11 +39,15 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 37/37 files, 1241 assertions, all passing** under the bytecode VM
+**Tests: 38/38 files, 1215 assertions, all passing** under the bytecode VM
 (`./sagemake test`). A test file that asserts nothing is reported as a failure
-rather than passing silently. The C backend compiles all 32 modules, but the assertion
+rather than passing silently. The C backend compiles all 33 modules, but the assertion
 suite is run on the bytecode VM only, so a native regression would not be caught
 by it. See [Known issues](#known-issues) for what is still broken.
+
+The bytecode VM is more forgiving about indentation than the C backend, so a
+module that the interpreter accepts can still fail to compile natively. Run both:
+the module loop in `Known issues` lists the command.
 
 ## Key Features
 
@@ -199,7 +203,7 @@ SageFS integrates Python-like readable and C-like performant SageLang to deliver
     against this implementation
   - No lock-free hot paths, no io_uring
 
-- **Development**: 27 test files, 767 assertions, 6 CLI tools
+- **Development**: 38 test files, 1215 assertions, 6 CLI tools
 
 The binary image format uses little-endian encoding with 4 KiB blocks and 512
 blocks per segment. The B+ tree is the exception: its node magic and its keys
@@ -237,7 +241,30 @@ structures.
 ./sagemake build --build-vm-stack --build-vm-riscv
 ```
 
-> **Note:** The native C backend does not support `bytes_*` builtins. `./sagemake build` automatically falls back to the SageVM bytecode backend, which fully supports all `Bytes` operations.
+> **Note:** The native C backend does not support `bytes_*` builtins. `./sagemake build
+
+#### Toolchain
+
+`sagemake` invokes the compiler as `sage-c`, so `sage-c` must be on `PATH`. It is
+the original name for the SageLang binary and a normal SageLang `make install`
+provides it as a link to `sage`, so installing SageLang is enough:
+
+```bash
+cd ../SageLang/core && make && sudo make install
+```
+
+Check that both names resolve to the same build before trusting a test result:
+
+```bash
+sage --version && sage-c --version   # must agree
+```
+
+A `sage-c` left over from an older SageLang release keeps working and reports no
+error, so a mismatch here does not announce itself. It did exactly that here: a
+month-old `sage-c` lacked `mem_copy_to_ptr`, and four test files failed on
+"Undefined variable" while the freshly built `sage` passed all four.
+
+` automatically falls back to the SageVM bytecode backend, which fully supports all `Bytes` operations.
 
 ### Format a Disk Image
 
@@ -284,7 +311,7 @@ What is missing is a working session setup.
 ### Run Tests
 
 ```bash
-# Full test suite — 27 files, 767 assertions
+# Full test suite — 38 files, 1215 assertions
 ./sagemake test
 
 # A single file

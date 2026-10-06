@@ -1,12 +1,16 @@
 import sys
+import cli_args
 import imgio
 from dedup import DedupEngine
 
 proc main(args: Array):
-    if len(args) < 2:
+    ## One positional argument, the image. This previously required two arguments
+    ## and then read args[1], so under a compiled binary it could not run at all,
+    ## and interpreted it read the include directory or the script path.
+    if len(args) < 1:
         print "Usage: dedup_cli.sage <image>"
         return
-    let image_path = args[1]
+    let image_path = args[0]
     let image_data = imgio.read_image(image_path)
     if bytes_len(image_data) == 0:
         print "Error: cannot read image '" + image_path + "'"
@@ -42,4 +46,4 @@ proc main(args: Array):
     print "  Space reclaimed:      " + str(space_reclaimed) + " bytes"
     print "  Stats:                hits=" + str(stats["hits"]) + " misses=" + str(stats["misses"]) + " deduped=" + str(stats["total_deduped"])
 
-main(sys.args())
+main(cli_args.program_args(sys.args()))
