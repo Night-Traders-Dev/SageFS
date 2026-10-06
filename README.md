@@ -39,7 +39,7 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 38/38 files, 1215 assertions, all passing** under the bytecode VM
+**Tests: 39/39 files, 1287 assertions, all passing** under the bytecode VM
 (`./sagemake test`). A test file that asserts nothing is reported as a failure
 rather than passing silently. The C backend compiles all 33 modules, but the assertion
 suite is run on the bytecode VM only, so a native regression would not be caught
@@ -144,9 +144,19 @@ the module loop in `Known issues` lists the command.
 - ⚠️ **Transparent compression** — `compress.sage` picks an algorithm by
   temperature and tracks ratios, then writes a 3-byte header followed by the
   original bytes. No compression is performed.
-  - ⚠️ **Deduplication** — the engine is complete (Bloom pre-check, exact fingerprint
-    table, refcounts, shared-fingerprint handling) and **SHA-256 is now available as the
-    block fingerprint**, verified against the published digests. It is *not* the default:
+  - ✅ **Deduplication** — wired into the block write path. A whole block whose content is
+    already stored shares that block instead of being written twice, and the sharing is
+    expressed in the extent: both files' extents name the same physical block and the
+    engine's reference count says how many files hold it. Any write into a shared block
+    takes a private copy first — copy-on-write, on partial writes as well as whole ones,
+    since a 16-byte edit into a shared block corrupts every other holder exactly as a
+    full-block write would. `test_dedup_share` asserts this in both backends, because the
+    failure mode is silent: the edited file reads back correctly while the others are
+    quietly wrong.
+
+    The engine (Bloom pre-check, exact fingerprint table, refcounts, shared-fingerprint
+    handling) is complete and **SHA-256 is available as the block fingerprint**, verified
+    against the published digests. It is *not* the default:
     `DEDUP_FP_FAST` (32-bit polynomial) stays default because SHA-256 costs ~16x more per
     block in this runtime — measured ~95 ms vs ~6 ms for a 4096-byte block, i.e. ~43 KiB/s
     against ~670 KiB/s — so whole-volume dedup on SHA-256 would take hours. Set
@@ -203,7 +213,7 @@ SageFS integrates Python-like readable and C-like performant SageLang to deliver
     against this implementation
   - No lock-free hot paths, no io_uring
 
-- **Development**: 38 test files, 1215 assertions, 6 CLI tools
+- **Development**: 39 test files, 1287 assertions, 6 CLI tools
 
 The binary image format uses little-endian encoding with 4 KiB blocks and 512
 blocks per segment. The B+ tree is the exception: its node magic and its keys
@@ -311,7 +321,7 @@ What is missing is a working session setup.
 ### Run Tests
 
 ```bash
-# Full test suite — 38 files, 1215 assertions
+# Full test suite — 39 files, 1287 assertions
 ./sagemake test
 
 # A single file

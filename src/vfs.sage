@@ -87,6 +87,8 @@ class VFS:
         ## checksumming but is still not free.
         self.verify_on_read = false
         self.csum_errors = 0
+        ## nid of the block _cow_block last allocated, so its caller can release it.
+        self._cow_nid = -1
         self.csum_last_bad = -1
         self.csum_last_reported = -1
         self.fds = []
@@ -151,6 +153,41 @@ class VFS:
             while i < needed_bytes:
                 bytes_push(self.image_buf, 0)
                 i = i + 1
+
+    ## _is_shared — Whether a logical block's content is held by more than one file.
+    proc _is_shared(self, blk_addr: Int) -> Bool:
+        return self.dedup.ref_count(blk_addr) > 1
+
+    ## _cow_block — Copy a shared block to a fresh one before modifying it.
+    ##
+    ## Returns the block the caller should write to, or -1 if the copy could not be
+    ## allocated. When the block is not shared that is the block itself.
+    ##
+    ## This is the whole point of the reference count. Writing into a shared block in
+    ## place is silent data loss: the file being edited and every other file reading
+    ## the same content all see the new bytes, with no error anywhere. The copy is
+    ## made before any byte is written, so the other holders keep the original.
+    ##
+    ## The nid of the new block is left in _cow_nid so the caller can release it if
+    ## it turns out not to be needed.
+    proc _cow_block(self, blk_addr: Int) -> Int:
+        self._cow_nid = -1
+        if not self._is_shared(blk_addr):
+            return blk_addr
+        let contents = self._read_block(blk_addr)
+        let alloc_info = self._alloc_block_addr("warm")
+        if alloc_info == nil:
+            ## Could not allocate. Returning the shared block would corrupt every
+            ## other holder, so refuse the write instead.
+            return -1
+        self._cow_nid = alloc_info["nid"]
+        let fresh = alloc_info["physical_blk"]
+        self._write_block(fresh, contents)
+        ## This file now owns the copy alone. The original's count drops by one --
+        ## this file's reference to it -- and stays as it is for the other holders.
+        self.dedup.dec_ref(blk_addr)
+        self.dedup.add_fingerprint(contents, fresh)
+        return fresh
 
     proc _read_block(self, blk_addr: Int) -> Bytes:
         let bs = self._init_block_size()
@@ -1222,6 +1259,13 @@ class VFS:
                 let target_off = f.pos + placed
                 var phys_blk = -1
                 var allocated_new = false
+                ## The nid behind phys_blk, so an allocation that turns out to be
+                ## unnecessary -- dedup found the content already stored -- can be
+                ## handed back instead of leaked.
+                var alloc_nid = -1
+                ## Set when phys_blk moved to a different block than the extent
+                ## named, which is what makes the extent need rewriting.
+                var wrote_cow = false
                 let existing = self.extent.lookup_extent(f.ino, target_off)
                 if existing != nil:
                     ## Which block inside that extent does this offset land in?
@@ -1238,6 +1282,7 @@ class VFS:
                         failed = true
                         break
                     phys_blk = alloc_info["physical_blk"]
+                    alloc_nid = alloc_info["nid"]
                     allocated_new = true
                 let chunk = bytes()
                 var c = 0
@@ -1248,22 +1293,81 @@ class VFS:
                 var chunk_off: Int = 0
                 if existing != nil:
                     chunk_off = (target_off - existing.file_offset) % bs
+
+                ## Copy-on-write, before anything is written and before any
+                ## sharing decision, because both of the steps below assume the
+                ## block is private to this file.
+                ##
+                ## phys_blk may be a block other files are also reading, because
+                ## dedup let them share its content. Writing into it directly hands
+                ## this file's edit to every other holder, with no error reported
+                ## anywhere -- the edited file reads back fine and the other files
+                ## are silently wrong.
+                ##
+                ## This applies to partial writes too. A 16-byte edit into a shared
+                ## block corrupts every other holder exactly as a whole-block write
+                ## would, and gating this on a full-block write is how that case
+                ## slips through.
+                ##
+                ## Only when the block is already mapped to this file. A freshly
+                ## allocated block is private by construction, and asking about it
+                ## would report it as shared the moment a second file deduplicated
+                ## onto the same content.
+                if existing != nil:
+                    let private_blk = self._cow_block(phys_blk)
+                    if private_blk < 0:
+                        failed = true
+                        break
+                    if private_blk != phys_blk:
+                        phys_blk = private_blk
+                        wrote_cow = true
+                        allocated_new = true
+                        alloc_nid = self._cow_nid
+
+                ## A whole block of new content can share the block that already
+                ## holds these bytes instead of being written twice. Only worth
+                ## considering for a complete block: a partial block matches no
+                ## fingerprint meaningfully, and registering one would pin the
+                ## block as the canonical home for content that is really a prefix
+                ## of something longer.
+                if chunk_len == bs and chunk_off == 0:
+                    let existing_addr = self.dedup.check_inline(chunk)
+                    if existing_addr >= 0 and existing_addr != phys_blk:
+                        ## This allocation was made to hold content that turns out
+                        ## to exist already, so hand it back rather than writing to
+                        ## it and leaving the space stranded.
+                        if allocated_new:
+                            self.allocator.free_block(alloc_nid)
+                        phys_blk = existing_addr
+                        ## The extent below has to name the shared block, not the
+                        ## one this file was going to use.
+                        wrote_cow = true
+                        allocated_new = false
+                        self.dedup.inc_ref(existing_addr)
+                    else:
+                        self.dedup.add_fingerprint(chunk, phys_blk)
+
                 self._write_block(phys_blk, chunk, chunk_off)
-                ## Only a freshly allocated block needs an extent. Writing in
-                ## place leaves the existing extent, which still describes the
-                ## whole block correctly -- re-inserting it with this chunk's
-                ## length replaced a 4096-byte extent with a 16-byte one, so the
-                ## rest of that block stopped being covered and the file lost the
-                ## bytes beyond the edit as soon as it was remounted.
-                if allocated_new:
+                ## Copy-on-write first, and this ordering is load-bearing. A
+                ## copy-on-write is also a fresh allocation, so testing allocated_new
+                ## first recorded the extent with this chunk's length: a 64-byte
+                ## partial edit produced a 64-byte extent over a 4096-byte block,
+                ## leaving the other 4032 bytes unmapped. The read path pads those
+                ## with zeroes, so the file came back as the patch followed by 4032
+                ## zero bytes -- the edit looked applied and the rest of the block
+                ## looked empty, with nothing reporting a problem.
+                if wrote_cow:
+                    self.extent.insert_extent(f.ino, f.pos + placed - chunk_off, phys_blk, bs)
+                elif allocated_new:
                     ## Length is in bytes, not blocks: end_offset() is
-                    ## file_offset + length, so passing 1 described every extent as
+                    ## file_offset + length, so passing 1 described every extent
                     ## covering a single byte. An 8192-byte file came out as two
                     ## extents of length 1 rather than one of 8192, which left the
                     ## extent map -- the authoritative description of a file's
                     ## block layout -- wrong for every block-mapped file.
                     self.extent.insert_extent(f.ino, f.pos + placed, phys_blk, chunk_len)
                 placed = placed + chunk_len
+
             if failed:
                 self.txmgr.abort()
                 return -1
