@@ -230,6 +230,25 @@ proc decode_inode_entry(buf: Bytes, off: Int) -> Dict:
     let name_len: Int = bytes_get(buf, off + 12) | (bytes_get(buf, off + 13) << 8)
     let data_len: Int = bytes_get(buf, off + 14) | (bytes_get(buf, off + 15) << 8)
     let payload: Int = off + 16
+    ## Reject an entry whose declared lengths do not fit before reading any of it.
+    ##
+    ## name_len and data_len come from the buffer, so they are whatever is on disk.
+    ## The two copy loops below walk that many bytes with no check of their own, and
+    ## the caller's `off + total > end_offset` test runs only *after* this returns --
+    ## far too late, because the out-of-range reads have already happened.
+    ##
+    ## This is not a corrupt-disk-only path. A freshly formatted volume has real
+    ## inode entries in this area, and decoding them walked off the end of the
+    ## buffer: "Invalid index assignment" once per byte, millions of times, and the
+    ## mount never completed. Every test in testing/ builds a bare superblock with a
+    ## zeroed inode area, where name_len and data_len are both 0 and the loops never
+    ## execute -- which is why the suite never saw it.
+    if off < 0 or off + 16 > bytes_len(buf):
+        return {"ino": 0, "mode": 0, "size": 0, "name": "", "data": "", "total": 0}
+    if name_len < 0 or data_len < 0:
+        return {"ino": 0, "mode": 0, "size": 0, "name": "", "data": "", "total": 0}
+    if payload + name_len + data_len > bytes_len(buf):
+        return {"ino": 0, "mode": 0, "size": 0, "name": "", "data": "", "total": 0}
     var name_bytes: Bytes = bytes()
     var j: Int = 0
     while j < name_len:
