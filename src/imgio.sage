@@ -69,10 +69,11 @@ proc read_image(path: String) -> Bytes:
                 offset = offset + BDEV_READ_SIZE
                 continue
             empty_reads = 0
-            var i = 0
-            while i < bytes_len(piece):
-                bytes_push(out, bytes_get(piece, i))
-                i = i + 1
+            ## bytes_extend() appends the whole chunk in one C-level copy. Doing
+            ## this with a per-byte loop is O(n) *interpreted* operations: a 256 MiB
+            ## image took 4m19s, which reads as a hang, and a 1 GiB volume would take
+            ## the better part of 20 minutes.
+            bytes_extend(out, piece)
             offset = offset + bytes_len(piece)
         if bytes_len(out) > 0:
             return out
