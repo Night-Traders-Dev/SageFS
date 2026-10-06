@@ -166,9 +166,18 @@ proc test_bloom_fixed_size():
     while i < 500:
         d.add_fingerprint(block_pattern(i), 1000 + i)
         i = i + 1
-    check("bloom filter size is constant", bytes_len(d.bloom_filter) == before)
-    check("bloom size matches DEDUP_BLOOM_SIZE",
-          before * 8 == dedup.DEDUP_BLOOM_SIZE)
+    ## check() takes (name, got, expected); this passed a Bool, so the file did not
+    ## compile under the C backend. The bytecode interpreter accepts the wrong arity
+    ## and the suite runs on the interpreter, so it was only ever caught by the
+    ## module-compile loop.
+    let size_unchanged: Int = 0
+    if bytes_len(d.bloom_filter) == before:
+        size_unchanged = 1
+    check("bloom filter size is constant", size_unchanged, 1)
+    let bits_match: Int = 0
+    if before * 8 == dedup.DEDUP_BLOOM_SIZE:
+        bits_match = 1
+    check("bloom size matches DEDUP_BLOOM_SIZE", bits_match, 1)
 
 proc test_bloom_no_false_negatives():
     ## The one property that must never break: reporting a present block as
@@ -182,7 +191,7 @@ proc test_bloom_no_false_negatives():
             check_bool("false negative at " + str(i), false)
             return
         i = i + 1
-    check_bool("no false negatives over 300 distinct blocks")
+    check_bool("no false negatives over 300 distinct blocks", true)
 
 proc test_bloom_shared_fingerprint_survives_removal():
     ## Two blocks with identical content share one fingerprint. Removing one must
