@@ -39,7 +39,7 @@ Status markers used below:
 | ⚠️ | implemented, but not currently called by any I/O path |
 | ❌ | stubbed, simulated, or not implemented |
 
-**Tests: 41/41 files, 1307 assertions, all passing** under the bytecode VM
+**Tests: 42/42 files, 1336 assertions, all passing** under the bytecode VM
 (`./sagemake test`). A test file that asserts nothing is reported as a failure
 rather than passing silently. The C backend compiles all 33 modules, but the assertion
 suite is run on the bytecode VM only, so a native regression would not be caught
@@ -213,7 +213,7 @@ SageFS integrates Python-like readable and C-like performant SageLang to deliver
     against this implementation
   - No lock-free hot paths, no io_uring
 
-- **Development**: 41 test files, 1307 assertions, 9 CLI tools
+- **Development**: 42 test files, 1336 assertions, 9 CLI tools
 
 The binary image format uses little-endian encoding with 4 KiB blocks and 512
 blocks per segment. The B+ tree is the exception: its node magic and its keys
@@ -321,7 +321,7 @@ What is missing is a working session setup.
 ### Run Tests
 
 ```bash
-# Full test suite — 41 files, 1307 assertions
+# Full test suite — 42 files, 1336 assertions
 ./sagemake test
 
 # A single file
