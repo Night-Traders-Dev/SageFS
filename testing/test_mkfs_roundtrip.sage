@@ -128,7 +128,17 @@ proc main():
     check("the bytes after the edit are untouched", bytes_get(got2, 164) == bytes_get(body, 164))
     check("the patched bytes are the new ones", same_bytes(bytes_slice(got2, 100, 164), patch))
 
+    ## Size must survive the unmount. This is the guard that matters for any change
+    ## to how the image is held in memory: unmount() writes self.image_buf back over
+    ## the file, so a partial in-memory model that forgets to write the whole thing
+    ## back truncates the volume. The file keeps its length and the data is simply
+    ## gone -- the same silent shape as every other bug this file was written for.
+    let size_before_unmount = io.filesize(path)
     check("unmount succeeded", fs.unmount())
+    check("unmount did not truncate the volume",
+          io.filesize(path) == size_before_unmount)
+    check("the volume is still at least as large as mkfs made it",
+          io.filesize(path) > 0)
 
     ## ---- Remount and confirm it all persisted ----------------------------
     let fs2 = fsimage.mount(path)
@@ -162,7 +172,10 @@ proc main():
         fs2.close(rd5)
         check("the post-remount write reads back", same_bytes(got5, body3))
 
+        let size_before = io.filesize(path)
         fs2.unmount()
+        check("the second unmount did not truncate the volume either",
+              io.filesize(path) == size_before)
 
     ## ---- Scrub should find no damage --------------------------------------
     let fs3 = fsimage.mount(path)
