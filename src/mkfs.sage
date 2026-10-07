@@ -294,7 +294,7 @@ proc verify_image(dev: String) -> Bool:
     print "verify: OK (superblock magic SAGEFS, " + str(bytes_len(buf)) + " bytes)"
     return true
 
-proc main(args: Array):
+proc run_cli(args: Array):
     let opts = parse_args(args)
     if opts["device"] == "":
         usage()
@@ -306,4 +306,9 @@ proc main(args: Array):
         return
     format_device(opts["device"], opts)
 
-main(cli_args.program_args(sys.args()))
+## Only format when run as a program. Importing mkfs.sage to reach format_device()
+## used to run the formatter as a side effect of the import, so a test could not
+## create a volume without shelling out -- and under the C backend the import was a
+## compile error rather than a surprise, because the call ran at module scope.
+if __name__ == "__main__":
+    run_cli(cli_args.program_args(sys.args()))
