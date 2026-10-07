@@ -1,7 +1,11 @@
 ## test_dedup.sage — unit tests for the SageFS deduplication engine
 
 import dedup
-let DedupEngine = dedup.DedupEngine
+## Note: `dedup.DedupEngine` is used qualified throughout rather than aliased to a
+## module-level name. Classes are not first-class values in the C backend -- a class
+## exists only as a name that sage_construct() looks up -- so `let X = SomeClass`
+## emits a reference to a C identifier that is never defined, in this module or any
+## other. The interpreter accepts it, which is why the suite was green.
 let DEDUP_FP_FAST = dedup.DEDUP_FP_FAST
 let DEDUP_FP_SHA256 = dedup.DEDUP_FP_SHA256
 let DEDUP_BLOOM_SIZE = dedup.DEDUP_BLOOM_SIZE
@@ -52,7 +56,7 @@ proc check_bool(name: String, got: Bool):
 
 proc test_fingerprint():
     print("compute_fingerprint:")
-    let engine = DedupEngine()
+    let engine = dedup.DedupEngine()
     var data = ascii_of("hello")
     let fp = engine.compute_fingerprint(data)
     check_bool("fingerprint starts with fp_", len(fp) > 3)
@@ -64,7 +68,7 @@ proc test_fingerprint():
 
 proc test_dedup_hit_miss():
     print("dedup hit/miss:")
-    let engine = DedupEngine()
+    let engine = dedup.DedupEngine()
     var data = bytes("deduplicatable content")
     let result = engine.check_inline(data)
     check("miss on unknown data", result, -1)
@@ -83,7 +87,7 @@ proc test_dedup_hit_miss():
 
 proc test_ref_counts():
     print("reference counting:")
-    let engine = DedupEngine()
+    let engine = dedup.DedupEngine()
     var data = bytes("shared block content")
     engine.add_fingerprint(data, 100)
     check("initial ref count", engine.ref_count(100), 1)
@@ -108,7 +112,7 @@ proc test_ref_counts():
 
 proc test_remove_block():
     print("remove block:")
-    let engine = DedupEngine()
+    let engine = dedup.DedupEngine()
     var data = bytes("remove me")
     engine.add_fingerprint(data, 77)
     check("ref before remove", engine.ref_count(77), 1)
@@ -123,14 +127,14 @@ proc test_remove_block():
 
 proc test_remove_nonexistent():
     print("remove nonexistent block:")
-    let engine = DedupEngine()
+    let engine = dedup.DedupEngine()
     engine.remove_block(999)
     let stats = engine.get_stats()
     check_bool("still works", stats["blocks_tracked"] >= 0)
 
 proc test_get_stats():
     print("get_stats:")
-    let engine = DedupEngine()
+    let engine = dedup.DedupEngine()
     var stats = engine.get_stats()
     check("initial hits", stats["hits"], 0)
     check("initial misses", stats["misses"], 0)
@@ -159,7 +163,7 @@ proc test_get_stats():
 ## not make a still-shared fingerprint look absent.
 
 proc test_bloom_fixed_size():
-    let d = dedup.DedupEngine()
+    let d = dedup.dedup.DedupEngine()
     ## Fixed regardless of contents.
     let before = bytes_len(d.bloom_filter)
     var i = 0
@@ -182,7 +186,7 @@ proc test_bloom_fixed_size():
 proc test_bloom_no_false_negatives():
     ## The one property that must never break: reporting a present block as
     ## absent returns -1 and writes duplicate data, so this has to hold exactly.
-    let d = dedup.DedupEngine()
+    let d = dedup.dedup.DedupEngine()
     var i = 0
     while i < 300:
         let fp = d.compute_fingerprint(block_pattern(i))
@@ -196,7 +200,7 @@ proc test_bloom_no_false_negatives():
 proc test_bloom_shared_fingerprint_survives_removal():
     ## Two blocks with identical content share one fingerprint. Removing one must
     ## not clear the bit, or the other becomes a false negative.
-    let d = dedup.DedupEngine()
+    let d = dedup.dedup.DedupEngine()
     let payload = bytes_pattern("shared")
     d.add_fingerprint(payload, 500)
     d.add_fingerprint(payload, 501)
@@ -207,7 +211,7 @@ proc test_bloom_shared_fingerprint_survives_removal():
 proc test_bloom_false_positive_rate_bounded():
     ## Absent fingerprints must not all read as present, or the pre-check is
     ## worthless. Insert a modest load and confirm absent items mostly miss.
-    let d = dedup.DedupEngine()
+    let d = dedup.dedup.DedupEngine()
     var i = 0
     while i < 200:
         d.add_fingerprint(block_pattern(i), 3000 + i)
@@ -223,7 +227,7 @@ proc test_bloom_false_positive_rate_bounded():
     check_bool("false positive rate under 25%", false_positives * 4 < probes)
 
 proc test_bloom_stats():
-    let d = dedup.DedupEngine()
+    let d = dedup.dedup.DedupEngine()
     d.add_fingerprint(block_pattern(1), 10)
     d.add_fingerprint(block_pattern(2), 11)
     let st = d.get_stats()
@@ -251,7 +255,7 @@ proc ascii_of(s: String) -> Bytes:
     return b
 
 proc test_fingerprint_algorithms():
-    let d = DedupEngine()
+    let d = dedup.DedupEngine()
     let data = ascii_of("hello")
     ## Default is the fast hash.
     check_bool("default is the fast hash", d.compute_fingerprint(data)[0:3] == "fp_")
@@ -278,7 +282,7 @@ proc test_fingerprint_algorithms():
 proc test_fingerprint_algorithms_do_not_collide():
     ## A fast hash and a digest for the same bytes must not be confusable, or a
     ## table populated under one algorithm would report false hits under the other.
-    let d = DedupEngine()
+    let d = dedup.DedupEngine()
     let data = ascii_of("payload")
     let fast = d.compute_fingerprint(data)
     ## Insert while still on the fast hash, so the stored key is the fast name.
@@ -297,7 +301,7 @@ proc test_bloom_filter_with_sha256_fingerprints():
     ## The Bloom filter hashes the fingerprint string, so a 71-character key is a
     ## very different shape from the 11-character one. It must still never produce
     ## a false negative, and every probe must land inside the filter.
-    let d = DedupEngine()
+    let d = dedup.DedupEngine()
     d.fingerprint_algo = DEDUP_FP_SHA256
     var i: Int = 0
     var no_false_negatives: Bool = true
@@ -324,7 +328,7 @@ proc test_bloom_filter_with_sha256_fingerprints():
 ## singly-referenced -- which is the condition copy-on-write needs to detect before
 ## writing, so a wrong count here means a shared block gets overwritten in place.
 proc test_repeated_add_increments_refcount():
-    let d = DedupEngine()
+    let d = dedup.DedupEngine()
     let blk = bytes_pattern("counted")
     d.add_fingerprint(blk, 500)
     check("first registration counts one", d.ref_count(500), 1)
