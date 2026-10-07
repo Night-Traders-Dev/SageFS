@@ -163,7 +163,7 @@ proc test_get_stats():
 ## not make a still-shared fingerprint look absent.
 
 proc test_bloom_fixed_size():
-    let d = dedup.dedup.DedupEngine()
+    let d = dedup.DedupEngine()
     ## Fixed regardless of contents.
     let before = bytes_len(d.bloom_filter)
     var i = 0
@@ -186,7 +186,7 @@ proc test_bloom_fixed_size():
 proc test_bloom_no_false_negatives():
     ## The one property that must never break: reporting a present block as
     ## absent returns -1 and writes duplicate data, so this has to hold exactly.
-    let d = dedup.dedup.DedupEngine()
+    let d = dedup.DedupEngine()
     var i = 0
     while i < 300:
         let fp = d.compute_fingerprint(block_pattern(i))
@@ -200,7 +200,7 @@ proc test_bloom_no_false_negatives():
 proc test_bloom_shared_fingerprint_survives_removal():
     ## Two blocks with identical content share one fingerprint. Removing one must
     ## not clear the bit, or the other becomes a false negative.
-    let d = dedup.dedup.DedupEngine()
+    let d = dedup.DedupEngine()
     let payload = bytes_pattern("shared")
     d.add_fingerprint(payload, 500)
     d.add_fingerprint(payload, 501)
@@ -211,7 +211,7 @@ proc test_bloom_shared_fingerprint_survives_removal():
 proc test_bloom_false_positive_rate_bounded():
     ## Absent fingerprints must not all read as present, or the pre-check is
     ## worthless. Insert a modest load and confirm absent items mostly miss.
-    let d = dedup.dedup.DedupEngine()
+    let d = dedup.DedupEngine()
     var i = 0
     while i < 200:
         d.add_fingerprint(block_pattern(i), 3000 + i)
@@ -227,7 +227,7 @@ proc test_bloom_false_positive_rate_bounded():
     check_bool("false positive rate under 25%", false_positives * 4 < probes)
 
 proc test_bloom_stats():
-    let d = dedup.dedup.DedupEngine()
+    let d = dedup.DedupEngine()
     d.add_fingerprint(block_pattern(1), 10)
     d.add_fingerprint(block_pattern(2), 11)
     let st = d.get_stats()
