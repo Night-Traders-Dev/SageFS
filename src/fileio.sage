@@ -171,13 +171,38 @@ proc write_at(path: String, offset: Int, buf: Bytes) -> Int:
 ## that want to know how big an image is have none yet. Reuses size()'s
 ## lseek-to-end rather than stat(), because the FFI returns only an int and
 ## st_size would have to be read back out of the struct by hand.
+## _probe_size — True file length for a file too large for lseek's return type.
+##
+## lseek reports the length through the FFI's 32-bit "int" return type, so a file
+## of 2 GiB or more comes back as a negative number rather than its length. Where
+## that happens, the size is recovered by asking the file directly: probe upward
+## for an offset that reads as empty, then binary search for the boundary. A
+## sparse hole reads back as real zeros, so this cannot tell a hole from data --
+## but for a length that is exactly what is being asked for, both answer alike.
+proc _probe_size(path: String) -> Int:
+    var lo: Int = 1
+    var hi: Int = 1
+    while hi < 4294967296 and bytes_len(read_at(path, hi - 1, 1)) > 0:
+        lo = hi
+        hi = hi * 2
+    ## lo is a length known to fit; hi is one known not to (or the search cap).
+    while lo < hi:
+        let mid: Int = lo + (hi - lo + 1) / 2
+        if bytes_len(read_at(path, mid - 1, 1)) > 0:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
 proc size_of(path: String) -> Int:
     let fd: Int = open_rd(path)
     if fd < 0:
         return -1
     let n: Int = size(fd)
     close(fd)
-    return n
+    if n >= 0:
+        return n
+    return _probe_size(path)
 
 ## slice_bytes — A Bytes covering buf[start, end).
 ##

@@ -133,6 +133,7 @@ proc main():
     ## the file, so a partial in-memory model that forgets to write the whole thing
     ## back truncates the volume. The file keeps its length and the data is simply
     ## gone -- the same silent shape as every other bug this file was written for.
+    let free_at_unmount: Int = len(fs.segment.free_segments)
     let size_before_unmount = io.filesize(path)
     check("unmount succeeded", fs.unmount())
     check("unmount did not truncate the volume",
@@ -144,6 +145,16 @@ proc main():
     let fs2 = fsimage.mount(path)
     check("the volume remounts", fs2 != nil)
     if fs2 != nil:
+        ## Regression: unmount() persisted the segment validity table only when
+        ## the table fit inside the in-memory image, and passed no path for the
+        ## case where it did not. A table that fails to write is worse than one
+        ## that is never consulted: the next mount reads every segment as free and
+        ## hands out blocks the previous session is still using, so a later write
+        ## lands on top of live data. Nothing else here notices -- the file above
+        ## still reads back correctly, because the block holding it has not been
+        ## reissued yet. Free segments have to come back the way they were left.
+        check("allocation state survived unmount",
+              len(fs2.segment.free_segments) == free_at_unmount)
         let rd3 = fs2.open("/roundtrip.bin", vfs.O_RDONLY)
         let got3 = fs2.read(rd3, 8192)
         fs2.close(rd3)

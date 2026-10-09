@@ -137,6 +137,32 @@ check("earlier bytes survive a later write",
 check("later bytes were written", both[4] == 0x5A and both[5] == 0x5B)
 sys.exec("rm -f " + rwpath)
 
+## Regression: size_of() reported lseek's answer through the FFI's 32-bit "int"
+## return type, so a file of 2 GiB or more came back negative. Callers that treat
+## a negative size as "cannot be opened" then reject a perfectly good volume --
+## mkfs reported "could not size" for an image it had just created correctly.
+## The boundary the search has to find is where the last byte stops existing.
+let bigpath: String = "/tmp/fileio_size_probe.bin"
+sys.exec("rm -f " + bigpath)
+fileio.write_at(bigpath, 0, bytes_pattern_a)
+check("size_of a small file is its length",
+      fileio.size_of(bigpath) == bytes_len(bytes_pattern_a))
+## Extending past EOF leaves a hole; the length is where the data stops being
+## reachable, not where the last real block was written.
+let hole_at: Int = 3000000
+fileio.write_at(bigpath, hole_at, later)
+check("size_of counts the gap up to the far write",
+      fileio.size_of(bigpath) == hole_at + 8)
+let empty_path: String = "/tmp/fileio_size_empty.bin"
+sys.exec("rm -f " + empty_path)
+fileio.write_at(empty_path, 0, bytes(1))
+sys.exec("rm -f " + empty_path)
+sys.exec("touch " + empty_path)
+check("size_of a zero-length file is 0", fileio.size_of(empty_path) == 0)
+check("size_of a missing file is -1", fileio.size_of("/tmp/fileio_absent.bin") == -1)
+sys.exec("rm -f " + bigpath)
+sys.exec("rm -f " + empty_path)
+
 print("  Results: " + str(TESTS_PASSED) + "/" + str(TESTS_RUN) + " passed")
 if TESTS_RUN == TESTS_PASSED:
     print("ALL FILEIO TESTS PASSED")

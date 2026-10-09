@@ -31,16 +31,28 @@ proc write_image(path: String, buf: Bytes) -> Bool:
 proc truncate_to(path: String, size: Int) -> Bool:
     if _is_block_device(path):
         return true
+    var extended = false
     try:
         ## libc truncate() rather than anything in the standard library: there
         ## is no os.truncate here, and this needs to extend the file to a size
         ## far larger than it is comfortable allocating.
         let lib = ffi.open("libc.so.6")
-        if lib == nil:
-            return false
-        return ffi.call(lib, "truncate", "int", [path, size]) == 0
+        if lib != nil:
+            extended = ffi.call(lib, "truncate", "int", [path, size]) == 0
     catch e:
+        extended = false
+    if extended:
+        return true
+    ## truncate() takes an off_t, but the FFI only has a 32-bit "int" argument
+    ## type, so a length of 2 GiB or more arrives truncated and the call fails.
+    ## Writing one chunk of zeros short of the end extends the file just the
+    ## same: the gap left behind reads back as zeros, so the result is a sparse
+    ## file of exactly the requested length and not a gigabyte of real zeroes.
+    let chunk: Int = 65536
+    if size <= 0 or size <= chunk:
         return false
+    fileio.write_at(path, size - chunk, bytes(chunk))
+    return fileio.size_of(path) >= size
 
 proc read_image(path: String) -> Bytes:
     let data = io.readbytes(path)

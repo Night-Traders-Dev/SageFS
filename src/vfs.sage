@@ -17,6 +17,7 @@ import extent as extent_module
 import btree as btree_module
 import inodetable as it_module
 import imgio
+import fileio
 import aio as aio_module
 import cache as cache_module
 import transaction as txn_module
@@ -155,6 +156,27 @@ class VFS:
         if needed_bytes > bytes_len(self.image_buf):
             bytes_resize(self.image_buf, needed_bytes)
 
+    ## _window_holds — Whether a byte range is inside the in-memory window.
+    proc _window_holds(self, offset: Int, length: Int) -> Bool:
+        return offset >= 0 and length >= 0 and offset + length <= bytes_len(self.image_buf)
+
+    ## _read_block_from_file — One block off disk, for a block the window lacks.
+    proc _read_block_from_file(self, blk_addr: Int) -> Bytes:
+        let bs = self._init_block_size()
+        let got = fileio.read_at(self.image_path, blk_addr * bs, bs)
+        if bytes_len(got) == bs:
+            return got
+        return bytes(bs)
+
+    ## _write_block_to_file — Write one block straight to disk.
+    proc _write_block_to_file(self, blk_addr: Int, data: Bytes):
+        let bs = self._init_block_size()
+        var n = bytes_len(data)
+        if n > bs:
+            n = bs
+        if n > 0:
+            fileio.write_at(self.image_path, blk_addr * bs, bytes_slice(data, 0, n))
+
     ## _is_shared — Whether a logical block's content is held by more than one file.
     proc _is_shared(self, blk_addr: Int) -> Bool:
         return self.dedup.ref_count(blk_addr) > 1
@@ -194,6 +216,8 @@ class VFS:
         let bs = self._init_block_size()
         let offset = blk_addr * bs
         let needed = offset + bs
+        if not self._window_holds(offset, bs):
+            return self._read_block_from_file(blk_addr)
         self._ensure_image_size(needed)
         ## One slice, not bs pairs of bytes_get/bytes_push. A block read is the
         ## single most frequent operation in the filesystem, and the loop made it
@@ -257,6 +281,20 @@ class VFS:
         let bs = self._init_block_size()
         let block_off = blk_addr * bs
         let offset = block_off + off_in_block
+        if not self._window_holds(offset, bytes_len(data)):
+            var n = bytes_len(data)
+            if off_in_block + n > bs:
+                n = bs - off_in_block
+            if n > 0:
+                var piece = data
+                if off_in_block > 0:
+                    let merged: Bytes = bytes(bs)
+                    bytes_copy_range(merged, 0, self._read_block_from_file(blk_addr), 0, bs)
+                    bytes_copy_range(merged, off_in_block, data, 0, n)
+                    piece = merged
+                self._write_block_to_file(blk_addr, piece)
+            self._record_csum(blk_addr)
+            return
         self._ensure_image_size(offset + bytes_len(data))
         ## One memmove instead of a per-byte set loop, for the same reason as the
         ## read path. The `off_in_block + i < bs` cap the loop carried is kept as
@@ -370,8 +408,8 @@ class VFS:
                 print("VFS: bad magic 0x" + str(self.sb.magic) + " (expected 0x" + str(superblock.SAGEFS_MAGIC) + ")")
                 return false
             let rneeded = self.sb.inode_entry_start_blk * self.sb.block_size + self.sb.inode_entry_byte_size
-            if self.sb.image_size > rneeded:
-                rneeded = self.sb.image_size
+            ## The window is the metadata region only; data blocks are read from and
+            ## written to the file on demand.
             if rneeded < superblock.SUPERBLOCK_HEADER_SIZE:
                 rneeded = superblock.SUPERBLOCK_HEADER_SIZE
             raw = imgio.read_image_range(self.image_path, 0, rneeded)
@@ -837,7 +875,8 @@ class VFS:
         if not self.mounted:
             return false
         self._persist_all()
-        self.sb.image_size = bytes_len(self.image_buf)
+        if self.sb.image_size <= 0:
+            self.sb.image_size = bytes_len(self.image_buf)
 
         ## Record where the extent tree lives, so the next mount can find it.
         ## Done before serialize() below, since that is what lands on disk.
@@ -867,7 +906,7 @@ class VFS:
         ## correct -- so say so rather than failing the unmount over it.
         if self.sit_loaded and self.segment != nil:
             let bs_u = self._init_block_size()
-            let sit_written = self.segment.save_sit(self.image_buf, self.sb.sit_start_blk, bs_u)
+            let sit_written = self.segment.save_sit(self.image_buf, self.sb.sit_start_blk, bs_u, self.image_path)
             if sit_written == 0:
                 print("SageFS: segment validity table could not be written; the next mount may " +
                       "reuse blocks this session allocated.")
@@ -881,7 +920,13 @@ class VFS:
         self.mounted = false
         self.fds = []
         self.next_fd = 0
-        imgio.write_image(self.image_path, self.image_buf)
+        ## write_image() truncates to the length it is given, which with a bounded
+        ## window would delete every data block past the metadata region on every
+        ## unmount. write_at() leaves the file length alone.
+        if not imgio._is_block_device(self.image_path):
+            fileio.write_at(self.image_path, 0, self.image_buf)
+        else:
+            imgio.write_image(self.image_path, self.image_buf)
         return true
 
     proc _bytes_to_hex(self, buf: Bytes) -> String:
