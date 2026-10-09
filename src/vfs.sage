@@ -288,8 +288,11 @@ class VFS:
             return nil
         if self.sb.csum_start_blk <= 0 or self.sb.csum_block_count <= 0:
             return nil
-        self.csum_region_cache = csum.CsumRegion(self.image_buf, self._init_block_size(),
-                                                self.sb.csum_start_blk, self.sb.csum_block_count)
+        self.csum_region_cache = csum.CsumRegion(self.image_buf,
+                                                 self._init_block_size(),
+                                                 self.sb.csum_start_blk,
+                                                 self.sb.csum_block_count,
+                                                 self.image_path)
         return self.csum_region_cache
 
     ## _record_csum — Store the checksum of one block. Silent no-op without a region.

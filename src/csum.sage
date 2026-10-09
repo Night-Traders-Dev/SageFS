@@ -21,6 +21,7 @@
 ## shift nat_start/sit_start/ssa_start/main_start, every one of which is an
 ## absolute block number that existing volumes already have on disk.
 
+import fileio
 from checksum import checksum_block, ChecksumTree, CHECKSUM_NONE
 
 ## Bytes per entry. LE32.
@@ -43,7 +44,15 @@ class CsumRegion:
     ## reach disk on the same flush. Keeping them in one buffer is what makes the
     ## entry and the block it describes impossible to desynchronise.
 
-    proc init(self, buf: Bytes, block_size: Int, start_blk: Int, region_blocks: Int):
+    ## `path` is the image the buffer came from. When set, offsets past the end of
+    ## `buf` are read from and written to that file instead of being refused. The
+    ## checksum region sits at the *end* of a volume, so once the image is no longer
+    ## held whole in memory it is always outside the window -- without this the
+    ## region silently reported every block as untracked, which is to say it reported
+    ## nothing while appearing to work.
+    proc init(self, buf: Bytes, block_size: Int, start_blk: Int, region_blocks: Int,
+              path: String = ""):
+        self.path = path
         self.buf = buf
         self.block_size = block_size
         self.start_blk = start_blk
@@ -68,6 +77,36 @@ class CsumRegion:
     proc byte_offset(self, block: Int) -> Int:
         return self.start_byte() + block * CSUM_REGION_ENTRY
 
+    ## _region_entry_fits — Whether an entry lies inside the region itself.
+    ##
+    ## Bounds against the buffer are not the same bounds: past the buffer the entry
+    ## may still be inside the region, or past the end of the volume entirely.
+    proc _region_entry_fits(self, off: Int) -> Bool:
+        let end: Int = self.start_byte() + self.region_blocks * self.block_size
+        return off >= self.start_byte() and off + CSUM_REGION_ENTRY <= end
+
+    ## _in_buf — Whether an offset is inside the in-memory buffer.
+    proc _in_buf(self, off: Int, length: Int) -> Bool:
+        return off >= 0 and length >= 0 and off + length <= bytes_len(self.buf)
+
+    ## _read_at — `length` bytes at `off`, from the buffer or the file.
+    proc _read_at(self, off: Int, length: Int) -> Bytes:
+        if self._in_buf(off, length):
+            return bytes_slice(self.buf, off, off + length)
+        if self.path != "":
+            let got = fileio.read_at(self.path, off, length)
+            if bytes_len(got) == length:
+                return got
+        return bytes(length)
+
+    ## _write_at — `data` at `off`, into the buffer or the file.
+    proc _write_at(self, off: Int, data: Bytes):
+        if self._in_buf(off, bytes_len(data)):
+            bytes_copy_range(self.buf, off, data, 0, bytes_len(data))
+            return
+        if self.path != "":
+            fileio.write_at(self.path, off, data)
+
     ## get — Expected checksum for a block, or CHECKSUM_NONE if untracked.
     proc get(self, block: Int) -> Int:
         ## Guard on present() first, not just on bounds. An absent region has
@@ -77,18 +116,27 @@ class CsumRegion:
         if not self.present():
             return CHECKSUM_NONE
         let off: Int = self.byte_offset(block)
-        if off < 0 or off + CSUM_REGION_ENTRY > bytes_len(self.buf):
+        if off < 0:
             return CHECKSUM_NONE
-        return read_le32_at(self.buf, off)
+        if self._in_buf(off, CSUM_REGION_ENTRY):
+            return read_le32_at(self.buf, off)
+        if self.path == "" or not self._region_entry_fits(off):
+            return CHECKSUM_NONE
+        return read_le32_at(self._read_at(off, CSUM_REGION_ENTRY), 0)
 
     ## set — Record a block's checksum.
     proc set(self, block: Int, checksum: Int):
         if not self.present():
             return
         let off: Int = self.byte_offset(block)
-        if off < 0 or off + CSUM_REGION_ENTRY > bytes_len(self.buf):
+        if off < 0:
             return
-        write_le32_at(self.buf, off, checksum & 0xFFFFFFFF)
+        if self._in_buf(off, CSUM_REGION_ENTRY):
+            write_le32_at(self.buf, off, checksum & 0xFFFFFFFF)
+            return
+        if self.path == "" or not self._region_entry_fits(off):
+            return
+        self._write_at(off, le32_bytes(checksum & 0xFFFFFFFF))
 
     ## record — Compute and store the checksum of a block already written to buf.
     proc record(self, block: Int, algo: Int):
@@ -96,9 +144,14 @@ class CsumRegion:
             return
         let bs: Int = self.block_size
         let off: Int = block * bs
-        if off < 0 or off + bs > bytes_len(self.buf):
+        if off < 0:
             return
-        self.set(block, checksum_block(csum_slice(self.buf, off, off + bs), algo))
+        if not self._in_buf(off, bs) and self.path == "":
+            return
+        let block_bytes = self._read_at(off, bs)
+        if bytes_len(block_bytes) < bs:
+            return
+        self.set(block, checksum_block(block_bytes, algo))
 
     ## verify — Compare a block's contents against its recorded checksum.
     ## Returns "ok", "mismatch", or "untracked".
@@ -168,6 +221,14 @@ proc csum_slice(buf: Bytes, start: Int, end: Int) -> Bytes:
         out[i] = buf[a + i]
         i = i + 1
     return out
+
+proc le32_bytes(v: Int) -> Bytes:
+    let b: Bytes = bytes(4)
+    bytes_set(b, 0, v & 0xFF)
+    bytes_set(b, 1, (v >> 8) & 0xFF)
+    bytes_set(b, 2, (v >> 16) & 0xFF)
+    bytes_set(b, 3, (v >> 24) & 0xFF)
+    return b
 
 proc read_le32_at(buf: Bytes, off: Int) -> Int:
     return bytes_get(buf, off) | (bytes_get(buf, off + 1) << 8) | (bytes_get(buf, off + 2) << 16) | (bytes_get(buf, off + 3) << 24)
