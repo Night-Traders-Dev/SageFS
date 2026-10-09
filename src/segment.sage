@@ -1,3 +1,5 @@
+import fileio
+
 ## SageFS Segment Manager & Segment Information Table (SIT)
 ##
 ## Core component of SageFS's log-structured storage layer, inspired by F2FS.
@@ -432,26 +434,39 @@ class SegmentManager:
     ## blocks must never be handed out again, and a stale cursor would keep
     ## writing into a segment whose remaining free space was computed for a
     ## previous mount.
-    proc load_sit(self, image: Bytes, sit_start_blk: Int, block_size: Int) -> Int:
+    ## `path` is the image `image` came from. The segment information table lives at
+    ## an arbitrary block, so once the image is windowed rather than held whole it is
+    ## generally outside the window; without this the whole load was refused and the
+    ## allocator came up believing every segment was free.
+    proc load_sit(self, image: Bytes, sit_start_blk: Int, block_size: Int,
+                  path: String = "") -> Int:
         if sit_start_blk <= 0 or block_size <= 0:
             return 0
         let base = sit_start_blk * block_size
-        if base < 0 or base + SIT_ENTRY_SIZE > bytes_len(image):
+        if base < 0:
+            return 0
+        let sit_end = base + self.total_segments * SIT_ENTRY_SIZE
+        if sit_end <= bytes_len(image):
+            ## Entirely inside the window.
+        elif path == "":
             return 0
         var loaded: Int = 0
         var segno: Int = 0
         while segno < self.total_segments:
             let off = base + segno * SIT_ENTRY_SIZE
-            if off + SIT_ENTRY_SIZE > bytes_len(image):
+            if off + SIT_ENTRY_SIZE <= bytes_len(image):
+                let chunk = bytes(SIT_ENTRY_SIZE)
+                bytes_copy_range(chunk, 0, image, off, SIT_ENTRY_SIZE)
+                if self.sit_entries[segno].deserialize(chunk):
+                    loaded = loaded + 1
+            elif off + SIT_ENTRY_SIZE <= sit_end and path != "":
+                let chunk = fileio.read_at(path, off, SIT_ENTRY_SIZE)
+                if bytes_len(chunk) < SIT_ENTRY_SIZE:
+                    break
+                if self.sit_entries[segno].deserialize(chunk):
+                    loaded = loaded + 1
+            else:
                 break
-            let entry = self.sit_entries[segno]
-            let chunk = bytes()
-            var i: Int = 0
-            while i < SIT_ENTRY_SIZE:
-                bytes_push(chunk, bytes_get(image, off + i))
-                i = i + 1
-            if entry.deserialize(chunk):
-                loaded = loaded + 1
             segno = segno + 1
         ## Rebuild the free list from what the bitmap says.
         var still_free: Array = []
@@ -478,21 +493,26 @@ class SegmentManager:
     ## image is written out. Returning without writing would leave the on-disk
     ## bitmap describing an earlier session, which is worse than not having one:
     ## it would look authoritative while being wrong.
-    proc save_sit(self, image: Bytes, sit_start_blk: Int, block_size: Int) -> Int:
+    ## Writes through to `path` for entries outside the window, so the table survives
+    ## an unmount that no longer writes the whole image back.
+    proc save_sit(self, image: Bytes, sit_start_blk: Int, block_size: Int,
+                  path: String = "") -> Int:
         if sit_start_blk <= 0 or block_size <= 0:
             return 0
         let base = sit_start_blk * block_size
-        if base < 0 or base + self.total_segments * SIT_ENTRY_SIZE > bytes_len(image):
+        if base < 0:
             return 0
         var written: Int = 0
         var segno: Int = 0
         while segno < self.total_segments:
             let entry_bytes = self.sit_entries[segno].serialize()
             let off = base + segno * SIT_ENTRY_SIZE
-            var i: Int = 0
-            while i < SIT_ENTRY_SIZE:
-                bytes_set(image, off + i, bytes_get(entry_bytes, i))
-                i = i + 1
+            if off + SIT_ENTRY_SIZE <= bytes_len(image):
+                bytes_copy_range(image, off, entry_bytes, 0, SIT_ENTRY_SIZE)
+            elif path != "":
+                fileio.write_at(path, off, entry_bytes)
+            else:
+                break
             written = written + 1
             segno = segno + 1
         return written

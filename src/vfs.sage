@@ -425,7 +425,7 @@ class VFS:
         ## a file loses its contents while still reporting the right size.
         if not self.sit_loaded:
             self.sit_loaded = true
-            self.sit_entries_loaded = self.segment.load_sit(self.image_buf, self.sb.sit_start_blk, bs)
+            self.sit_entries_loaded = self.segment.load_sit(self.image_buf, self.sb.sit_start_blk, bs, self.image_path)
 
         if self.inode == nil:
             self.inode = inode_module.InodeManager(self.nat)
