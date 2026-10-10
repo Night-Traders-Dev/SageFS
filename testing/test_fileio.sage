@@ -7,6 +7,7 @@
 ## error. The tests below open real files and check the bytes that come back.
 
 import fileio
+import imgio
 import sys
 
 ## Two distinguishable 4-byte payloads for the ranged-write test below.
@@ -162,6 +163,36 @@ check("size_of a zero-length file is 0", fileio.size_of(empty_path) == 0)
 check("size_of a missing file is -1", fileio.size_of("/tmp/fileio_absent.bin") == -1)
 sys.exec("rm -f " + bigpath)
 sys.exec("rm -f " + empty_path)
+
+## The wrap this fixes was not visible below 2 GiB, because the answer fitted.
+## seek() and size() read lseek's off_t through a 32-bit int return, so a file at
+## 4 GiB measured negative and every caller took that for "cannot be opened".
+## Sparse, so the test costs a few kilobytes on disk rather than four gigabytes.
+let hugepath: String = "/tmp/fileio_huge.bin"
+sys.exec("rm -f " + hugepath)
+let huge_size: Int = 4294967296
+check("a 4 GiB file can be created and measured",
+      imgio.truncate_to(hugepath, huge_size) and fileio.size_of(hugepath) == huge_size)
+## size_of() recovers a wrapped answer by probing, so it would read correctly
+## even with the narrow call underneath it. size(fd) is the primitive that wraps,
+## and everything that measures a file goes through it.
+let huge_fd: Int = fileio.open_rd(hugepath)
+check("size(fd) reports a 4 GiB length, not a wrapped negative",
+      huge_fd >= 0 and fileio.size(huge_fd) == huge_size)
+fileio.close(huge_fd)
+let far_gap: Int = huge_size - 4096
+let tail = bytes(8)
+tail[0] = 0x11
+tail[7] = 0x77
+check("a write near the far end of a 4 GiB file lands",
+      fileio.write_at(hugepath, far_gap, tail) == 8)
+let far_got: Bytes = fileio.read_at(hugepath, far_gap, 8)
+check("and reads back", bytes_len(far_got) == 8 and far_got[0] == 0x11 and far_got[7] == 0x77)
+let hole: Bytes = fileio.read_at(hugepath, huge_size / 2, 4)
+check("the hole left between reads as zeros", bytes_len(hole) == 4)
+check("the file is still the length it was asked to be",
+      fileio.size_of(hugepath) == huge_size)
+sys.exec("rm -f " + hugepath)
 
 print("  Results: " + str(TESTS_PASSED) + "/" + str(TESTS_RUN) + " passed")
 if TESTS_RUN == TESTS_PASSED:
