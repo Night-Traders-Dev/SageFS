@@ -70,15 +70,15 @@ proc close(fd: Int):
 proc seek(fd: Int, offset: Int) -> Int:
     if not init():
         return -1
-    return ffi.call(libc_handle, "lseek", "int", [fd, offset, 0])
+    return ffi.call(libc_handle, "lseek", "long", [fd, offset, 0])
 
 ## ffio_size — Size of the file behind fd, via lseek(0, SEEK_END).
 proc size(fd: Int) -> Int:
     if not init():
         return -1
-    ffi.call(libc_handle, "lseek", "int", [fd, 0, 2])
-    let end: Int = ffi.call(libc_handle, "lseek", "int", [fd, 0, 1])
-    ffi.call(libc_handle, "lseek", "int", [fd, 0, 0])
+    ffi.call(libc_handle, "lseek", "long", [fd, 0, 2])
+    let end: Int = ffi.call(libc_handle, "lseek", "long", [fd, 0, 1])
+    ffi.call(libc_handle, "lseek", "long", [fd, 0, 0])
     return end
 
 ## ffio_truncate — truncate(2). Extends with zeros, or shortens.

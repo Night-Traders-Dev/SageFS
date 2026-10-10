@@ -38,7 +38,7 @@ proc truncate_to(path: String, size: Int) -> Bool:
         ## far larger than it is comfortable allocating.
         let lib = ffi.open("libc.so.6")
         if lib != nil:
-            extended = ffi.call(lib, "truncate", "int", [path, size]) == 0
+            extended = ffi.call(lib, "truncate", "long", [path, size]) == 0
     catch e:
         extended = false
     if extended:
